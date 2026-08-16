@@ -110,3 +110,17 @@ class TestSymbolToTargetTranslation:
 
     def test_module_under_src_layout(self):
         ...
+
+
+class TestTier2Rows:
+    """§18's two Tier 2 rows, skipped until Tier 2 exists (v5.1 §19:
+    build Tier 1, run it two weeks, then decide)."""
+
+    @pytest.mark.skip(reason="Tier 2 quality-diff not built (v5.1 §7, §19)")
+    def test_duplicated_40_line_block(self):
+        """§18: duplicated 40-line block → quality-diff regression."""
+
+    @pytest.mark.skip(reason="Tier 2 quality-diff not built (v5.1 §7, §19)")
+    def test_symbol_renamed_reports_introduced_and_resolved(self):
+        """§18: symbol renamed, no other change → quality-diff reports
+        1 introduced + 1 resolved and FAILS, requiring review (§7)."""
