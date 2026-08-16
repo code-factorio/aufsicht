@@ -1,3 +1,23 @@
+# aufsicht — repository conventions
+
+## Two roles: consumer and evaluator (distribution spec §7)
+
+This repository runs its own guardrails on itself, from the working
+tree rather than the published version. `.quality/**` and
+`.github/workflows/**` are protected paths as usual (v5.1 §11.2).
+
+`src/aufsicht/**` is **not** a protected path. It is the product — the
+evaluator itself. Protecting it under v5.1 §11.2 would mean every
+commit to the project trips the integrity check. Its control is code
+review plus the self-test suite (`tests/`, executing the v5.1 §18 and
+distribution §8 tables against generated scratch repositories), which
+is a stronger control than a path rule anyway.
+
+Do not build a threat model on the assumption that `src/aufsicht/**`
+is integrity-protected. It is not, by design, and that exception is
+recorded here precisely so it does not become an implicit security
+assumption.
+
 <!-- aufsicht:begin (do not edit outside these delimiters; appended by `aufsicht init`) -->
 
 ## Quality guardrails (aufsicht)
