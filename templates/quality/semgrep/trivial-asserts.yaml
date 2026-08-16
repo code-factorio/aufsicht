@@ -1,0 +1,27 @@
+# Trivially-passing verification — zero tolerance (v5.1 §9.2).
+rules:
+  - id: trivial-assert-constant
+    message: trivially-true assertion (assert True/1/not False, v5.1 §9.2)
+    languages: [python]
+    severity: ERROR
+    pattern-either:
+      - pattern: assert True
+      - pattern: assert 1
+      - pattern: assert not False
+      - pattern: assert $X == $X
+      - pattern: assert isinstance($X, object)
+
+  - id: trivial-assert-mock
+    message: >-
+      assertion on a Mock/MagicMock — unconditionally truthy, can never
+      fail (v5.1 §9.2)
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    pattern-sources:
+      - pattern: $M = MagicMock(...)
+      - pattern: $M = Mock(...)
+      - pattern: $M = $Q.Mock(...)
+      - pattern: $M = create_autospec(...)
+    pattern-sinks:
+      - pattern: assert $M

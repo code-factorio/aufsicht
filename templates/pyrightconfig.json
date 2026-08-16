@@ -1,0 +1,5 @@
+{
+  "typeCheckingMode": "basic",
+  "strict": [],
+  "exclude": [".quality", ".venv"]
+}

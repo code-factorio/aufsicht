@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environments
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.pyscn/
+coverage-report/
+
+# aufsicht runtime caches live outside the repo (~/.cache/aufsicht);
+# nothing here should ever hold gate state (v5.1 §4.3: base counts are
+# computed, never committed).

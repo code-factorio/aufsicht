@@ -1,0 +1,58 @@
+# aufsicht configuration (v5.1 §8: all thresholds configurable here).
+# schema_version is an integer; a runner refuses — loudly — config from
+# a newer schema rather than silently misreading it (distribution §10).
+
+schema_version = 1
+
+[base]
+# v5.1 §4.6 resolution order: CI env var, then this, then remote HEAD.
+# Set this when the repository has no remote or runs standalone.
+ref = "main"
+
+[integrity]
+# Deployment model (v5.1 §11.1): A = agent isolated with signing keys,
+# B = agent in the developer's shell (server-side review is the control),
+# C = solo developer (the check is a tripwire, not a security control).
+deployment_model = "B"
+
+[fast]
+# v5.1 §5: quality-fast < 15s is a MUST. If the budget is exceeded,
+# narrow scope (pyright/pytest/semgrep below) — never raise the budget.
+budget_seconds = 15
+pyright = "changed-files"   # or "off" when the probe measured over budget
+pytest = "affected"         # tests touching changed modules only
+semgrep = "changed-files"
+
+[tests]
+# The declared project test budget (v5.1 §5): repo-specific, measured at
+# install by the pytest-suite probe and written down here.
+# budget_seconds = 120
+
+[complexity]
+c901_max = 10               # per-function, changed-file scope (v5.1 §4.2)
+xenon_max_average = "A"     # aggregate — count ratchet (v5.1 §6.2)
+xenon_max_modules = "A"
+xenon_max_absolute = "C"    # deliberately loose so it never fights C901
+
+[test_verification]
+# The observable-verification act set (v5.1 §9.1). A test function
+# fails when its body contains none of these. Add your own assertion
+# helpers here rather than suppressing the rule.
+statements = ["assert"]
+calls = [
+  "pytest.raises", "pytest.warns", "pytest.deprecated_call",
+  "self.assert*", "self.fail",
+  "assert_*", "check_*", "verify_*",
+  "*.assert_called*", "*.assert_has_calls",
+  "snapshot", "verify",
+]
+
+[pip_audit]
+enabled = true              # CI budget; not inner-loop (v5.1 §5)
+
+# [mutation]                # Tier 3 (addendum) — built later
+# enabled = false
+# floor = 0.60
+# min_scoreable = 20
+# function_cap = 25
+# wall_clock_minutes = 20
