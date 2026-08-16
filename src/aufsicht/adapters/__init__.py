@@ -10,4 +10,14 @@ Importing this package registers every gate (see pipeline.REGISTRY).
 
 from __future__ import annotations
 
-from . import ruff, suppressions  # noqa: F401
+from . import (  # noqa: F401
+    deptry,
+    pip_audit,
+    pyscn,
+    pytest_adapter,
+    pyright,
+    ruff,
+    semgrep,
+    suppressions,
+    xenon,
+)

@@ -31,3 +31,12 @@ dev = ["pytest>=9"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aufsicht"]
+
+# Ship the templates inside the wheel: an installed runner must carry
+# its own .quality/ templates (distribution spec §4); the fallback in
+# init/writers.py covers editable checkouts.
+[tool.hatch.build.targets.wheel.force-include]
+"templates" = "aufsicht/templates"
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/templates", "/tests", "/spec", "/skill", "/install", "/README.md"]

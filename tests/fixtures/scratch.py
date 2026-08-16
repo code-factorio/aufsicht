@@ -100,17 +100,23 @@ def make_repo(
     app: str = CLEAN_APP,
     test: str = CLEAN_TEST,
     with_quality: bool = True,
+    with_tests: bool = True,
     base_branch: str = "main",
+    extra_files: dict[str, str] | None = None,
 ) -> Path:
     """Create a scratch repo with one clean commit on *base_branch*."""
     path.mkdir(parents=True, exist_ok=True)
     run_git("init", "-b", base_branch, cwd=path)
-    write_files(path, {
+    files = {
         "pyproject.toml": SCRATCH_PYPROJECT,
         "src/scratch/__init__.py": "",
         "src/scratch/app.py": app,
-        "tests/test_app.py": test,
-    })
+    }
+    if with_tests:
+        files["tests/test_app.py"] = test
+    if extra_files:
+        files.update(extra_files)
+    write_files(path, files)
     if with_quality:
         install_quality(path, base_ref=base_branch)
     run_git("add", "-A", cwd=path)

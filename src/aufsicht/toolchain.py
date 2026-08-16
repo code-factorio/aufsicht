@@ -169,32 +169,100 @@ def _create_env(target: Path, pins: list[str], *, python: str | None) -> None:
         _run([str(_bin_dir(target) / "python"), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", *pins])
 
 
+def _env_complete(env: Path, tools: list[str]) -> bool:
+    """A trusted env has its marker AND every expected entry point
+    whose shebang interpreter exists.
+
+    Marker-only trust is not enough under concurrent builds, and
+    existence-only trust is not enough because entry-point shebangs
+    embed absolute interpreter paths — an env relocated after install
+    has live-looking scripts that fail with ENOENT. Self-heal instead
+    of trusting.
+    """
+    if not (env / ".aufsicht-ok").is_file():
+        return False
+    bin_dir = _bin_dir(env)
+    for tool in tools:
+        exe = bin_dir / tool
+        if not exe.exists():
+            return False
+        try:
+            first = exe.read_bytes()[:256]
+        except OSError:
+            return False
+        if first.startswith(b"#!"):
+            shebang = first.split(b"\n", 1)[0][2:].decode("utf-8", "replace").strip()
+            # shebang may carry flags: use the first path-looking token
+            for part in shebang.split():
+                if "/" in part and not Path(part).exists():
+                    return False
+    return True
+
+
+def _build_env_in_place(
+    env: Path,
+    tools: list[str],
+    build,
+    *,
+    lock_stale_seconds: float = 1800.0,
+    wait_timeout: float = 3600.0,
+) -> Path:
+    """Build *env* in place (never rename a venv: entry-point shebangs
+    embed absolute paths), guarded by a lock so concurrent processes
+    don't interleave installs."""
+    import time as _time
+
+    if _env_complete(env, tools):
+        return env
+    env.parent.mkdir(parents=True, exist_ok=True)
+    lock = env.with_name(env.name + ".lock")
+    if _env_complete(env, tools):
+        return env
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+    except FileExistsError:
+        deadline = _time.monotonic() + wait_timeout
+        while _time.monotonic() < deadline:
+            if _env_complete(env, tools):
+                return env
+            try:
+                if _time.time() - lock.stat().st_mtime > lock_stale_seconds:
+                    lock.unlink()  # builder died; take over
+            except OSError:
+                pass
+            _time.sleep(1.0)
+        raise ToolingError(
+            f"timed out waiting for a concurrent build of {env.name}",
+            remedy="Remove stale caches under the aufsicht cache dir and retry.",
+        )
+    try:
+        if not _env_complete(env, tools):
+            if env.exists():
+                shutil.rmtree(env)
+            build(env)
+            (env / ".aufsicht-ok").write_text("built-by-aufsicht\n", encoding="utf-8")
+            if not _env_complete(env, tools):
+                raise ToolingError(
+                    f"environment {env.name} incomplete after build "
+                    f"(missing entry points for {tools})",
+                    remedy="Check the pinned versions and network access.",
+                )
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+    return env
+
+
 def _ensure_env(
     root: Path, key: str, pins: list[str], *, python: str | None = None
 ) -> Path:
-    """Return a ready env at *root/key*, building it atomically once."""
-    env = root / key
-    marker = env / ".aufsicht-ok"
-    if marker.is_file():
-        return env
-    tmp = root / f"{key}.tmp.{os.getpid()}"
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    try:
-        _create_env(tmp, pins, python=python)
-        (tmp / ".aufsicht-ok").write_text("\n".join(pins), encoding="utf-8")
-        try:
-            tmp.rename(env)  # atomic on the same filesystem
-        except OSError:
-            # Lost a race, or it already exists: use the winner.
-            if marker.is_file():
-                shutil.rmtree(tmp, ignore_errors=True)
-                return env
-            raise
-    except ToolingError:
-        shutil.rmtree(tmp, ignore_errors=True)
-        raise
-    return env
+    """Return a ready env at *root/key*, building it once."""
+    tools = [p.split("==")[0] for p in pins]
+    return _build_env_in_place(root / key, tools, lambda env: _create_env(env, pins, python=python))
 
 
 def analyzer_env(lock: Toolchain, cache: Path | None = None) -> Path:
@@ -259,20 +327,13 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
     root = cache / "projenvs"
     root.mkdir(parents=True, exist_ok=True)
     pytest_pin = f"pytest=={lock.pin('pytest')}" if lock.pin("pytest") else "pytest"
-    env = root / f"proj-{key}"
-    marker = env / ".aufsicht-ok"
-    if marker.is_file():
-        return env
 
-    tmp = root / f"proj-{key}.tmp.{os.getpid()}"
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    try:
+    def build(env: Path) -> None:
         if _have_uv():
-            _run(["uv", "venv", "--quiet", str(tmp)])
+            _run(["uv", "venv", "--quiet", str(env)])
             install = [
                 "uv", "pip", "install", "--quiet",
-                "--python", str(_bin_dir(tmp) / "python"),
+                "--python", str(_bin_dir(env) / "python"),
                 "-r", "pyproject.toml", pytest_pin,
             ]
             proc = subprocess.run(install, cwd=str(repo), capture_output=True, text=True, timeout=900)
@@ -284,21 +345,11 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
             base = shutil.which("python3") or shutil.which("python")
             if base is None:
                 raise ToolingError("neither uv nor python3 is available to build environments")
-            _run([base, "-m", "venv", str(tmp)])
-            _run([str(_bin_dir(tmp) / "python"), "-m", "pip", "install",
+            _run([base, "-m", "venv", str(env)])
+            _run([str(_bin_dir(env) / "python"), "-m", "pip", "install",
                   "--quiet", "--disable-pip-version-check", pytest_pin])
-        (tmp / ".aufsicht-ok").write_text(pytest_pin, encoding="utf-8")
-        try:
-            tmp.rename(env)
-        except OSError:
-            if marker.is_file():
-                shutil.rmtree(tmp, ignore_errors=True)
-                return env
-            raise
-    except ToolingError:
-        shutil.rmtree(tmp, ignore_errors=True)
-        raise
-    return env
+
+    return _build_env_in_place(root / f"proj-{key}", ["pytest"], build)
 
 
 def project_lockfile_differs(base_repo: Path, head_repo: Path) -> bool:

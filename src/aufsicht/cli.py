@@ -63,6 +63,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         force=args.force,
         as_json=args.json,
+        write=args.write,
     )
 
 
@@ -87,11 +88,16 @@ def build_parser() -> argparse.ArgumentParser:
     with_repo(sub.add_parser("fast", help="quality-fast: read-only, diff-scoped, <15s"))
     with_repo(sub.add_parser("full", help="quality-full: read-only, whole repo, ratchets"))
     with_repo(sub.add_parser("fix", help="quality-fix: MAY mutate (never in CI)"))
-    with_repo(sub.add_parser("upgrade", help="print the .quality/ diff this runner would apply"))
+    p_upgrade = with_repo(sub.add_parser(
+        "upgrade", help="print the .quality/ diff this runner would apply"))
+    p_upgrade.add_argument("--json", action="store_true",
+                           help="machine-readable diff output")
 
     p_init = with_repo(sub.add_parser("init", help="Layer 2: install guardrails into a repo"))
     p_init.add_argument("--dry-run", action="store_true",
                         help="stop after propose (default when stdout is not a TTY)")
+    p_init.add_argument("--write", action="store_true",
+                        help="proceed to the write phase even when stdout is not a TTY")
     p_init.add_argument("--force", action="store_true",
                         help="overwrite an existing installation (refuses a dirty tree)")
     p_init.add_argument("--json", action="store_true",

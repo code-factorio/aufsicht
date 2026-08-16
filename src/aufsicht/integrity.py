@@ -187,6 +187,23 @@ def integrity_gate(ctx: GateContext) -> GateResult:
                 "protected paths changed: " + ", ".join(changed)
             )
 
+    # Allowlist validation and expiry (v5.1 §10): absolute, not
+    # overridable by the allowlist itself.
+    import datetime as dt
+
+    from . import allowlist as allowlist_mod
+
+    al = allowlist_mod.load_allowlist(ctx.repo)
+    today = dt.date.today()
+    ctx.report.allowlist_expiring_within_30d = al.expiring_within_30d(today)
+    for problem in allowlist_mod.validate(al.entries, today):
+        failures.append(f"allowlist validation: {problem}")
+    for e in allowlist_mod.expired_entries(al.entries, today):
+        failures.append(
+            f"allowlist entry expired {e.expires}: {e.rule} ({e.path or 'no path'}) — "
+            "no silent permanence (v5.1 §10)"
+        )
+
     for section, computed, expected in section_hash_mismatches(ctx):
         failures.append(
             f"semantic hash of pyproject [{section}] changed "
