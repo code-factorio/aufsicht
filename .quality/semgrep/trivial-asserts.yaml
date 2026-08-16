@@ -1,0 +1,38 @@
+# Trivially-passing verification — zero tolerance (v5.1 §9.2).
+#
+# Measured against semgrep 1.173.0:
+#   * `assert $X == $X` fires only for identical operands (x == x yes,
+#     x == y no) — no adapter-side post-filter needed;
+#   * taint binds `m = MagicMock()` / `m = Mock()` / dotted
+#     `mock.MagicMock()` / `mock.Mock()` / `create_autospec(...)` and
+#     propagates through `result = m.compute()` → `assert result`;
+#   * the sink needs both `assert $M` and `assert $M(...)` — a bare
+#     `assert $M` does not match `assert m.compute()`.
+rules:
+  - id: trivial-assert-constant
+    message: trivially-true assertion (assert True/1/not False, v5.1 §9.2)
+    languages: [python]
+    severity: ERROR
+    pattern-either:
+      - pattern: assert True
+      - pattern: assert 1
+      - pattern: assert not False
+      - pattern: assert $X == $X
+      - pattern: assert isinstance($X, object)
+
+  - id: trivial-assert-mock
+    message: >-
+      assertion on a Mock/MagicMock — unconditionally truthy, can never
+      fail (v5.1 §9.2)
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    pattern-sources:
+      - pattern: $M = MagicMock(...)
+      - pattern: $M = Mock(...)
+      - pattern: $M = $X.MagicMock(...)
+      - pattern: $M = $X.Mock(...)
+      - pattern: $M = create_autospec(...)
+    pattern-sinks:
+      - pattern: assert $M
+      - pattern: assert $M(...)

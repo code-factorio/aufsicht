@@ -83,19 +83,37 @@ def probe_pytest_wall_clock(
     project_env: Path, repo: Path, timeout: int = 300
 ) -> tuple[float | None, bool]:
     """Run the suite once; returns (seconds, completed). The number is
-    written to config as the declared budget (v5.1 §5)."""
+    written to config as the declared budget (v5.1 §5).
+
+    Probes run BEFORE .quality/ exists, so the invocation cannot use
+    the installed pytest.ini — equivalent flags are passed directly
+    (pythonpath from the detected layout, tests/ as the target).
+    """
     bin_dir = project_env / ("Scripts" if os.name == "nt" else "bin")
     python = bin_dir / "python"
-    ini = repo / ".quality" / "pytest.ini"
-    args = [str(python), "-m", "pytest", "-c", str(ini), "--tb=no", "-q"]
     if not (repo / "tests").is_dir():
         return (None, True)
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    pythonpath = ["src", "."] if (repo / "src").is_dir() else ["."]
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(repo / p) for p in pythonpath]
+        + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    args = [
+        str(python), "-m", "pytest", "--tb=no", "-q",
+        "-p", "no:cacheprovider", "--color=no", "tests",
+    ]
     started = time.monotonic()
     try:
-        subprocess.run(
-            args, cwd=str(repo), capture_output=True, text=True, timeout=timeout
+        proc = subprocess.run(
+            args, cwd=str(repo), capture_output=True, text=True,
+            timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:
+        return (None, False)
+    if proc.returncode in (2, 3, 4):
+        # interrupted / internal / usage error — not a measurement
         return (None, False)
     return (time.monotonic() - started, True)
 

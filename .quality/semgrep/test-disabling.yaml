@@ -1,0 +1,21 @@
+# Test disabling — zero tolerance on added lines (v5.1 §8).
+# Scoped by the runner to added lines (diff-scoped, v5.1 §4.2).
+rules:
+  - id: pytest-test-disabled
+    message: >-
+      test disabled (skip/xfail) — v5.1 §16: never disable a test to make
+      a task complete
+    languages: [python]
+    severity: ERROR
+    pattern-either:
+      - pattern: "@pytest.mark.skip"
+      - pattern: "@pytest.mark.skip(...)"
+      - pattern: "@pytest.mark.skipif(...)"
+      - pattern: "@pytest.mark.xfail"
+      - pattern: "@pytest.mark.xfail(...)"
+      - pattern: pytest.skip(...)
+      - pattern: pytest.xfail(...)
+      - pattern: "@unittest.skip"
+      - pattern: "@unittest.skip(...)"
+      - pattern: "@unittest.skipIf(...)"
+      - pattern: self.skipTest(...)

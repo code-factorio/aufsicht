@@ -1,0 +1,54 @@
+# aufsicht CI — the real gate (v5.1 §5: pre-commit runs quality-fast
+# only; CI runs quality-full, read-only, never commits).
+#
+# fetch-depth: 0 is load-bearing, not cosmetic (v5.1 §4.6): the default
+# shallow checkout makes `git merge-base` fail or lie, and the gate
+# exits 3 rather than silently disable every ratchet.
+name: aufsicht
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  quality-full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Self-hosting (distribution spec §7): this repository runs its
+      # own guardrails FROM THE WORKING TREE, not the published version.
+      # Target repositories install the pinned runner from the index
+      # instead (distribution spec §3).
+      - name: Install the runner from the working tree
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
+      - name: quality-full
+        shell: bash
+        run: |
+          set -o pipefail
+          aufsicht full | tee aufsicht-report.json
+
+      - name: Runner self-test suite (v5.1 §18 / distribution §8)
+        env:
+          AUFSICHT_CACHE_DIR: ${{ runner.temp }}/aufsicht-cache
+        run: python -m pytest tests -q
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aufsicht-report
+          path: aufsicht-report.json
