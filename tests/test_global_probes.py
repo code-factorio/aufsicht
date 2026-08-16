@@ -23,7 +23,8 @@ def pinned_env(tmp_path_factory):
     import aufsicht.toolchain as tc
 
     tmp = tmp_path_factory.mktemp("probe-locks")
-    (tmp / "toolchain.lock").write_text(SCRATCH_TOOLCHAIN)
+    (tmp / ".quality").mkdir()
+    (tmp / ".quality" / "toolchain.lock").write_text(SCRATCH_TOOLCHAIN)
     lock = tc.load_toolchain(tmp)
     return tc.analyzer_env(lock)
 

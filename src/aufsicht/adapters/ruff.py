@@ -118,6 +118,13 @@ def run_format_check(ctx: GateContext, cwd: Path, files: list[str]) -> list[Find
         *_config_arg(cwd), *files, cwd=cwd,
     )
     if proc.returncode not in (0, 1):
+        # Measured: ruff format --check exits 2 on an unparseable file.
+        # A syntax error is a finding, not a tooling error — E999 from
+        # `ruff check` already carries it, and aborting the pipeline
+        # here would make the downstream pyright <no-rule> ratchet
+        # unreachable (v5.1 §18).
+        if proc.returncode == 2:
+            return []
         raise ToolingError(
             f"ruff format --check failed (exit {proc.returncode}): {proc.stderr[:500]}",
             remedy="Check .quality/ruff.toml and the pinned ruff version.",

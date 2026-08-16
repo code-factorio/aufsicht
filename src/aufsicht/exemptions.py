@@ -19,6 +19,7 @@ from __future__ import annotations
 import tomllib
 
 from . import ratchet
+from .integrity import semantic_hash
 from .pipeline import GateContext
 from .toolchain import ENVIRONMENT_SENSITIVE_TOOLS
 
@@ -70,8 +71,6 @@ def _config_changed_for_tool(ctx: GateContext, tool: str) -> bool:
             base_data = tomllib.loads(base_bytes.decode("utf-8"))
         except (tomllib.TOMLDecodeError, UnicodeDecodeError):
             base_data = {}
-    from .integrity import semantic_hash
-
     for section in sections:
         if _section_hash(head_data, section) != _section_hash(base_data, section):
             return True
@@ -110,6 +109,33 @@ def _toolchain_bumps(ctx: GateContext) -> tuple[set[str], bool]:
     return bumped, runner_changed
 
 
+def _xenon_letters_changed(ctx: GateContext) -> bool:
+    """True when [complexity] xenon_* letters differ between BASE and
+    HEAD: tightening a letter makes more modules count as over under
+    identical code, which is a config change, not a regression."""
+    import tomllib
+
+    def letters_at(source: bytes | None) -> tuple | None:
+        if source is None:
+            return None
+        try:
+            table = tomllib.loads(source.decode("utf-8")).get("complexity", {})
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(table, dict):
+            return None
+        return tuple(
+            table.get(k) for k in
+            ("xenon_max_average", "xenon_max_modules", "xenon_max_absolute")
+        )
+
+    head = (ctx.repo / ".quality" / "config.toml").read_text(encoding="utf-8") \
+        if (ctx.repo / ".quality" / "config.toml").is_file() else None
+    base = ratchet.read_file_at(ctx.repo, ctx.base.sha, ".quality/config.toml")
+    h, b = letters_at(head.encode() if head else None), letters_at(base)
+    return h is not None and b is not None and h != b
+
+
 def compute_exemptions(ctx: GateContext) -> None:
     """Populate report.exempt_tools / exemption_reasons /
     dependency_environment_changed (v5.1 §4.5, §4.4)."""
@@ -118,6 +144,13 @@ def compute_exemptions(ctx: GateContext) -> None:
     for tool in RATCHETED_TOOLS:
         if _config_changed_for_tool(ctx, tool):
             reasons[tool] = f"configuration for {tool} changed in this PR"
+
+    if _xenon_letters_changed(ctx):
+        reasons.setdefault(
+            "xenon",
+            "[complexity] xenon rank letters changed in this PR — the "
+            "modules-over count is not comparable",
+        )
 
     bumped, runner_changed = _toolchain_bumps(ctx)
     for tool in sorted(bumped):

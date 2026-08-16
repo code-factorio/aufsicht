@@ -158,6 +158,17 @@ def run_pipeline(repo: Path, mode: str) -> Report:
         except ToolingError as exc:
             report.tooling_error = exc
             break
+        except Exception as exc:  # noqa: BLE001 — the report is the interface (v5.1 §15)
+            # A gate crashing must still produce a JSON report with the
+            # partial results and exit 3; dying with a traceback and no
+            # stdout violates the contract that an agent can parse.
+            report.tooling_error = ToolingError(
+                f"gate {name} crashed: {type(exc).__name__}: {exc}",
+                remedy="This is a runner bug or a broken analyzer "
+                       "invocation — report it against the aufsicht runner "
+                       f"version in the report.",
+            )
+            break
 
     report.duration_seconds = time.monotonic() - started
     return report

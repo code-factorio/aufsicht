@@ -63,11 +63,18 @@ def assert_c901_span(ruff_exe: str | Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "complex.py"
         src.write_text(C901_PROBE_SOURCE, encoding="utf-8")
-        proc = subprocess.run(
-            [str(ruff_exe), "check", "--isolated", "--select", "C901",
-             "--output-format", "json", str(src)],
-            capture_output=True, text=True, timeout=120,
-        )
+        try:
+            proc = subprocess.run(
+                [str(ruff_exe), "check", "--isolated", "--select", "C901",
+                 "--output-format", "json", str(src)],
+                capture_output=True, text=True, timeout=120,
+            )
+        except OSError as exc:
+            raise ToolingError(
+                f"C901 global probe: could not execute ruff at {ruff_exe}: {exc}",
+                remedy="Check the pinned ruff in .quality/toolchain.lock and "
+                       "the analyzer environment.",
+            ) from exc
         try:
             findings = json.loads(proc.stdout or "[]")
         except json.JSONDecodeError as exc:

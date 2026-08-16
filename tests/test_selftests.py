@@ -60,6 +60,20 @@ class TestCleanCopyPasses:
         assert report["runner_version"]
         assert report["spec_version"] == "v5.1"
 
+    def test_report_carries_runner_version_matching_the_tool(self, tmp_path):
+        # dist §8: "report carries runner version → present and matches
+        # the installed tool"
+        from aufsicht import __version__
+
+        repo = make_repo(tmp_path / "version")
+        code, report = run_full(repo)
+        assert report["runner_version"] == __version__
+        lock_runner = None
+        for line in (repo / ".quality" / "toolchain.lock").read_text().splitlines():
+            if line.startswith("runner_version"):
+                lock_runner = line.split("=")[1].strip().strip('"')
+        assert lock_runner == __version__
+
 
 class TestRuffDiffScoped:
     def test_formatting_violation(self, tmp_path):
