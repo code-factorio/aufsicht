@@ -1,0 +1,51 @@
+# Ruff policy for this repository (v5.1 §6, §6.1, §8).
+#
+# This file is a protected path (v5.1 §11.2). Changes belong in their
+# own approved PR; the Ruff ratchet is exempted for that PR (§4.5) and
+# every unrelated ratchet still runs.
+#
+# Ruff discovers this file via `--config`; per-file-ignores patterns
+# are matched against paths relative to the repository root.
+
+line-length = 100
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "UP",   # pyupgrade
+    "PGH",  # blanket suppression detection (PGH003/PGH004)
+    "PT",   # pytest style
+    "ERA",  # commented-out code
+    "RUF",  # ruff-specific, incl. RUF100 unused noqa
+    "C901", # per-function complexity (changed-file scope, v5.1 §4.2)
+]
+
+# The enumerated security rules (v5.1 §6.1). Ruff emits no severity or
+# confidence metadata, so there is nothing to filter on: the gate is
+# zero findings in changed files.
+extend-select = [
+    "S102",  # exec
+    "S105", "S106", "S107",  # hardcoded password / secret
+    "S301",  # pickle load
+    "S302",  # marshal
+    "S306",  # mktemp
+    "S307",  # eval
+    "S311",  # non-cryptographic RNG in a security context
+    "S324",  # weak hash (md5, sha1)
+    "S501",  # requests with verify=False
+    "S506",  # unsafe yaml.load
+    "S602", "S605",  # shell=True / os.system
+    "S608",  # SQL built by string concatenation
+]
+
+[lint.mccabe]
+max-complexity = 10
+
+[lint.per-file-ignores]
+# S101 (bare assert) is deliberately absent from the S list — pytest is
+# built on assert — but tests may still trip S105/S106/S311 legitimately.
+"tests/**" = ["S101", "S105", "S106", "S311"]

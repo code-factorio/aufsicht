@@ -1,0 +1,43 @@
+# aufsicht CI — the real gate (v5.1 §5: pre-commit runs quality-fast
+# only; CI runs quality-full, read-only, never commits).
+#
+# fetch-depth: 0 is load-bearing, not cosmetic (v5.1 §4.6): the default
+# shallow checkout makes `git merge-base` fail or lie, and the gate
+# exits 3 rather than silently disable every ratchet.
+name: aufsicht
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  quality-full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the pinned aufsicht runner (distribution spec §3)
+        run: pip install aufsicht==0.1.0
+
+      - name: quality-full
+        shell: bash
+        run: |
+          set -o pipefail
+          aufsicht full | tee aufsicht-report.json
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aufsicht-report
+          path: aufsicht-report.json
