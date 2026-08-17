@@ -52,6 +52,12 @@ def run_cli(
     """Invoke the real CLI: `python -m aufsicht <args>` in *cwd*."""
     env = {
         **os.environ,
+        # The CLI commits (`aufsicht init --write`) with the same
+        # identity as the harness, hermetically: CI runners have no
+        # global git identity, and their hostname makes git's
+        # auto-detected email unusable, so the inner `git commit`
+        # would fail there while passing on a developer machine.
+        **GIT_ENV,
         "AUFSICHT_CACHE_DIR": str(TEST_CACHE),
         # No CI variables leak into scratch runs; base resolution goes
         # through [base] ref in the scratch config.

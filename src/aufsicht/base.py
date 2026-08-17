@@ -101,8 +101,7 @@ def resolve_base(repo: Path, config: QualityConfig) -> BaseRef:
         return _merge_base_or_die(head, sha, repo, source=SOURCE_CONFIG, ref=config.base_ref)
 
     # 3. remote HEAD of each remote (deterministic order).
-    remotes_proc = gitutil.git("remote", cwd=repo)
-    remotes = sorted(r for r in remotes_proc.stdout.split() if r)
+    remotes = gitutil.remotes(repo)
     for remote in remotes:
         sym = gitutil.git(
             "symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD",

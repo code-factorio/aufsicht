@@ -263,3 +263,32 @@ class TestBaseResolution:
         # No CI env (conftest clears them), no [base] ref, no remote → exit-3 path.
         with pytest.raises(BaseResolutionError):
             resolve_base(repo, QualityConfig.from_dict({"schema_version": 1}))
+
+    def test_ci_branch_name_resolves_through_remote(self, tmp_path: Path, monkeypatch):
+        # A PR checkout (fetch-depth: 0) has the base only as a
+        # remote-tracking ref — no local branch `main`. GITHUB_BASE_REF
+        # carries the bare branch name, so resolution must fall through
+        # to refs/remotes/origin/main.
+        from aufsicht.base import resolve_base
+
+        origin = make_repo(tmp_path / "origin")
+        origin_sha = run_git("rev-parse", "HEAD", cwd=origin).stdout.strip()
+        clone = tmp_path / "clone"
+        # --no-checkout: no local branches, HEAD on the remote's tip —
+        # the same shape actions/checkout leaves behind on pull_request.
+        run_git("clone", "-q", "--no-checkout", str(origin), str(clone), cwd=tmp_path)
+        run_git("checkout", "-q", "-b", "feature", "origin/main", cwd=clone)
+        # A clone still writes the local default branch; remove it so
+        # `main` exists ONLY as refs/remotes/origin/main.
+        run_git("branch", "-q", "-d", "main", cwd=clone)
+        (clone / "src/scratch/app.py").write_text(
+            "def add(a: int, b: int) -> int:\n    return a - b\n", encoding="utf-8"
+        )
+        run_git("commit", "-q", "-am", "change", cwd=clone)
+        assert not (clone / ".git/refs/heads/main").exists()
+
+        monkeypatch.setenv("GITHUB_BASE_REF", "main")
+        cfg = QualityConfig.load(clone)
+        base = resolve_base(clone, cfg)
+        assert base.source == "ci"
+        assert base.sha == origin_sha

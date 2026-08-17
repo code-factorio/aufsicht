@@ -30,10 +30,13 @@ jobs:
       # own guardrails FROM THE WORKING TREE, not the published version.
       # Target repositories install the pinned runner from the index
       # instead (distribution spec §3).
+      # uv ships with the runner install (v5.1 §4.4: uv is the supported
+      # resolver — the pip-audit gate exits 3 without it, and the
+      # self-tests spawn the CLI in scratch repos that freeze through it).
       - name: Install the runner from the working tree
         run: |
           python -m pip install --upgrade pip
-          python -m pip install .
+          python -m pip install . uv
 
       - name: quality-full
         shell: bash

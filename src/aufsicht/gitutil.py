@@ -71,18 +71,30 @@ def is_40_hex(value: str) -> bool:
     return len(value) == 40 and all(c in "0123456789abcdef" for c in value.lower())
 
 
+def remotes(cwd: Path) -> list[str]:
+    """The repository's remotes, sorted (deterministic order)."""
+    proc = git("remote", cwd=cwd, check=False)
+    return sorted(r for r in proc.stdout.split() if r)
+
+
 def resolve_to_sha(value: str, cwd: Path) -> str | None:
     """Resolve a ref-or-sha string to a full commit SHA, or None.
 
     Accepts full SHAs directly and tries ref spellings a CI might hand
-    us: the literal name, refs/<kind>/<name>, and <remote>/<name>.
+    us: the literal name, refs/<kind>/<name>, and <remote>/<name>. A
+    CI checkout often has no local branch for the base (a PR checkout
+    is a detached merge ref), so a bare branch name must also resolve
+    through every remote — GITHUB_BASE_REF=main lives at
+    refs/remotes/origin/main.
     """
     if is_40_hex(value):
         verify = git("rev-parse", "--verify", "--quiet", f"{value}^{{commit}}", cwd=cwd, check=False)
         if verify.returncode == 0:
             return verify.stdout.strip()
         return None
-    for candidate in (value, f"refs/heads/{value}", f"refs/remotes/{value}"):
+    candidates = [value, f"refs/heads/{value}", f"refs/remotes/{value}"]
+    candidates += [f"refs/remotes/{remote}/{value}" for remote in remotes(cwd)]
+    for candidate in candidates:
         proc = git(
             "rev-parse", "--verify", "--quiet",
             f"{candidate}^{{commit}}", cwd=cwd, check=False,
