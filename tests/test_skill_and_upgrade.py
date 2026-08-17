@@ -50,6 +50,21 @@ class TestBootstrapIdentity:
         assert f'AUFSICHT_VERSION="{__version__}"' in text
 
 
+class TestVersionConsistency:
+    def test_pyproject_version_matches_runner(self):
+        # The one previously unchecked pair (distribution spec §10):
+        # what the index receives must equal the runner's __version__,
+        # or a release ships a bootstrap pinning the wrong number.
+        import tomllib
+
+        from aufsicht import __version__
+
+        pyproject = tomllib.loads(
+            (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        assert pyproject["project"]["version"] == __version__
+
+
 class TestSkillMd:
     def test_frontmatter_present(self):
         text = SKILL_MD.read_text(encoding="utf-8")
