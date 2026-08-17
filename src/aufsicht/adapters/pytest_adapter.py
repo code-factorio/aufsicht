@@ -48,6 +48,7 @@ Everything below is written against measured pytest 9.1.1 behaviour
 from __future__ import annotations
 
 import configparser
+import hashlib
 import os
 import re
 import subprocess
@@ -143,12 +144,15 @@ def _timeout_seconds(budget: int | None) -> int:
 
 def run_suite(
     ctx: GateContext, paths: list[str] | None = None
-) -> tuple[subprocess.CompletedProcess[str], float]:
+) -> tuple[subprocess.CompletedProcess[str], float, Path | None]:
     """Run the suite (whole, or just *paths*) from the project env.
 
-    Returns ``(process, wall_clock_seconds)``. Raises ToolingError on
-    timeout and on exit 2/3/4 — never lets an interrupted run look
-    like a pass or a fail.
+    Returns ``(process, wall_clock_seconds, coverage_json_path)`` — the
+    coverage path is set when branch coverage ran (full mode with
+    pytest-cov pinned; v5.1 §19) and points into the aufsicht cache,
+    never into the guarded repository. Raises ToolingError on timeout
+    and on exit 2/3/4 — never lets an interrupted run look like a pass
+    or a fail.
     """
     env_dir = project_env(ctx.repo, ctx.lock, ctx.cache)
     python = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -169,8 +173,26 @@ def run_suite(
         "-p",
         "no:cacheprovider",
         "--continue-on-collection-errors",
-        *(paths or ()),
     ]
+    suite_env = _suite_env(ctx.repo)
+    coverage_json: Path | None = None
+    if ctx.mode == MODE_FULL and ctx.lock.pin("pytest-cov"):
+        # Branch coverage in the gate (v5.1 §19), recorded as telemetry
+        # (§8): never gated at Tier 1. All coverage artifacts go to the
+        # aufsicht cache — the gate is read-only (§14).
+        cov_dir = ctx.cache / "coverage"
+        cov_dir.mkdir(parents=True, exist_ok=True)
+        tag = hashlib.sha256(str(ctx.repo).encode()).hexdigest()[:12]
+        coverage_json = cov_dir / f"coverage-{tag}.json"
+        source_root = "src" if (ctx.repo / "src").is_dir() else "."
+        args += [
+            f"--cov={source_root}",
+            "--cov-branch",
+            "--cov-report=",
+            f"--cov-report=json:{coverage_json}",
+        ]
+        suite_env["COVERAGE_FILE"] = str(cov_dir / f".coverage-{tag}")
+    args += list(paths or ())
     timeout = _timeout_seconds(ctx.config.tests_budget_seconds)
     started = time.monotonic()
     try:
@@ -180,7 +202,7 @@ def run_suite(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=_suite_env(ctx.repo),
+            env=suite_env,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
@@ -208,7 +230,7 @@ def run_suite(
             f"inconclusive, neither a pass nor a fail. Last output: {excerpt!r}",
             remedy=remedy,
         )
-    return proc, elapsed
+    return proc, elapsed, coverage_json
 
 
 def _split_nodeid(nodeid: str) -> tuple[str, str | None]:
@@ -324,6 +346,26 @@ def affected_test_files(repo: Path, diff: DiffModel) -> list[str]:
     return selected
 
 
+def _coverage_percent(coverage_json: Path) -> float | None:
+    """Branch+line coverage percent from a coverage.py JSON report.
+
+    Returns None when the report is missing or empty (nothing measured
+    — e.g. a repo with tests but no source): absent telemetry, not a
+    zero, and never a gate.
+    """
+    import json as _json
+
+    try:
+        data = _json.loads(coverage_json.read_text(encoding="utf-8"))
+        totals = data.get("totals", {})
+    except (OSError, _json.JSONDecodeError):
+        return None
+    percent = totals.get("percent_covered")
+    if isinstance(percent, (int, float)):
+        return round(float(percent), 1)
+    return None
+
+
 def _budget_extra(ctx: GateContext, elapsed: float) -> dict:
     """[tests] budget_seconds is telemetry, never a gate (v5.1 §5)."""
     extra: dict = {"suite_seconds": round(elapsed, 2)}
@@ -363,12 +405,19 @@ def pytest_gate(ctx: GateContext) -> GateResult:
             )
         extra["selected"] = paths
 
-    proc, elapsed = run_suite(ctx, paths)
+    proc, elapsed, coverage_json = run_suite(ctx, paths)
     extra.update(_budget_extra(ctx, elapsed))
     if ctx.lock.pin("pytest") is None:
         extra["pytest_pin"] = (
             "unpinned — pytest is not in .quality/toolchain.lock (v5.1 §4.4)"
         )
+    if coverage_json is not None:
+        covered = _coverage_percent(coverage_json)
+        if covered is not None:
+            # Telemetry, never gated at Tier 1 (v5.1 §8); diff coverage
+            # thresholds are Tier 2.
+            ctx.report.metrics.setdefault("coverage", {})["head"] = covered
+            extra["branch_coverage_percent"] = covered
 
     if proc.returncode == EXIT_NO_TESTS:
         detail = (

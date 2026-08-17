@@ -110,7 +110,9 @@ def run_lint(ctx: GateContext, cwd: Path, files: list[str] | None) -> list[Findi
     return parse_findings(proc.stdout)
 
 
-def run_format_check(ctx: GateContext, cwd: Path, files: list[str]) -> list[Finding]:
+def run_format_check(
+    ctx: GateContext, cwd: Path, files: list[str], lint_findings: list[Finding] | None = None
+) -> list[Finding]:
     if not files:
         return []
     proc = ctx.run(
@@ -120,11 +122,20 @@ def run_format_check(ctx: GateContext, cwd: Path, files: list[str]) -> list[Find
     if proc.returncode not in (0, 1):
         # Measured: ruff format --check exits 2 on an unparseable file.
         # A syntax error is a finding, not a tooling error — E999 from
-        # `ruff check` already carries it, and aborting the pipeline
-        # here would make the downstream pyright <no-rule> ratchet
-        # unreachable (v5.1 §18).
+        # `ruff check` carries it, and aborting the pipeline here would
+        # make the downstream pyright <no-rule> ratchet unreachable
+        # (v5.1 §18). Any OTHER exit-2 cause (no E999 in the lint run)
+        # stays a tooling error: fail closed, visibly.
         if proc.returncode == 2:
-            return []
+            e999 = {f.path for f in (lint_findings or []) if f.rule in ("E999", "none")}
+            if e999:
+                return []
+            raise ToolingError(
+                "ruff format --check exited 2 without a corresponding "
+                "syntax error in `ruff check`",
+                remedy="Run `ruff format --check` by hand to see the cause; "
+                       "this is inconclusive, not a pass.",
+            )
         raise ToolingError(
             f"ruff format --check failed (exit {proc.returncode}): {proc.stderr[:500]}",
             remedy="Check .quality/ruff.toml and the pinned ruff version.",
@@ -168,10 +179,14 @@ def _ratchet_counts(ctx: GateContext, cwd: Path, config_files_root: Path) -> dic
 
 
 def _base_config_hash(repo: Path, sha: str) -> str:
-    blob = ratchet_mod.read_file_at(repo, sha, RUFF_CONFIG)
-    if blob is None:
-        return "none"
-    return hashlib.sha256(blob).hexdigest()
+    """Hash of whichever ruff config the BASE run will actually use —
+    all three discovery locations, so two BASEs differing only in a
+    fallback config cannot share a cache key."""
+    for rel in (RUFF_CONFIG, ".ruff.toml", "ruff.toml"):
+        blob = ratchet_mod.read_file_at(repo, sha, rel)
+        if blob is not None:
+            return f"{rel}:{hashlib.sha256(blob).hexdigest()}"
+    return "none"
 
 
 def lint_ratchet(ctx: GateContext) -> tuple[dict[str, int], dict[str, int], bool]:
@@ -193,9 +208,13 @@ def lint_ratchet(ctx: GateContext) -> tuple[dict[str, int], dict[str, int], bool
 
 @gate("ruff")
 def ruff_gate(ctx: GateContext) -> GateResult:
-    changed = _changed_python_files(ctx.diff)
+    # Only files that exist in the working tree: a renamed (or deleted)
+    # path's old side is in the changed set, and ruff exits 2 on
+    # missing paths — the deletion itself is integrity's subject, not
+    # the lint gate's.
+    changed = [f for f in _changed_python_files(ctx.diff) if (ctx.repo / f).is_file()]
     findings = _relative(run_lint(ctx, ctx.repo, files=changed), ctx.repo) if changed else []
-    format_findings = run_format_check(ctx, ctx.repo, changed)
+    format_findings = run_format_check(ctx, ctx.repo, changed, lint_findings=findings)
     diff_findings = findings + format_findings
 
     mechanism = MECH_DIFF

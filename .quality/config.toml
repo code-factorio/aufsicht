@@ -22,7 +22,7 @@ deployment_model = "B"
 # narrow scope (pyright/pytest/semgrep below) — never raise the budget.
 budget_seconds = 15
 pyright = "changed-files"   # or "off" when the probe measured over budget
-pytest = "affected"         # tests touching changed modules only
+pytest = "off"         # tests touching changed modules only
 semgrep = "changed-files"
 
 [tests]

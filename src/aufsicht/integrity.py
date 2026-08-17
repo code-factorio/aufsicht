@@ -128,30 +128,115 @@ def section_hash_mismatches(ctx: GateContext) -> list[tuple[str, str | None, str
 # --- model A: signed commits on protected paths ----------------------------
 
 
+def _principals(signers_path: Path) -> list[str]:
+    """Principals named in an allowed-signers file (first field of each
+    non-comment, non-empty line)."""
+    principals: list[str] = []
+    try:
+        for line in signers_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            first = line.split()[0]
+            if first not in principals:
+                principals.append(first)
+    except OSError:
+        pass
+    return principals
+
+
+def _extract_ssh_signature(repo: Path, sha: str) -> tuple[bytes, bytes] | None:
+    """(armored_signature, payload) for an SSH-signed commit, or None.
+
+    The payload is the commit object with the gpgsig header removed —
+    exactly the bytes `ssh-keygen -Y verify` checks the signature
+    against; the signature stays in its armored form because that is
+    what `-s` consumes. Unsigned commits return None.
+    """
+    proc = subprocess.run(
+        ["git", "cat-file", "commit", sha],
+        cwd=str(repo), capture_output=True, check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    raw = proc.stdout
+    lines = raw.split(b"\n")
+    headers: list[bytes] = []
+    sig_lines: list[bytes] = []
+    in_sig = False
+    idx = 0
+    for idx, line in enumerate(lines):
+        if line == b"":
+            break  # end of header block
+        if line.startswith(b"gpgsig ") or line.startswith(b"gpgsigssh "):
+            in_sig = True
+            sig_lines.append(line.split(b" ", 1)[1])
+            continue
+        if in_sig and line.startswith(b" "):
+            sig_lines.append(line[1:])
+            continue
+        in_sig = False
+        headers.append(line)
+    if not sig_lines:
+        return None
+    payload = b"\n".join(headers) + b"\n" + b"\n".join(lines[idx:])
+    # Re-arm with 70-column base64 lines — the format `ssh-keygen -Y
+    # verify -s` consumes (measured: raw decoded bytes are rejected
+    # with sshsig_armor: invalid format).
+    import base64
+
+    try:
+        body = b"".join(l for l in sig_lines if not l.startswith(b"-----"))
+        decoded = base64.b64decode(body)
+    except Exception:  # noqa: BLE001 — malformed sig is just unsigned
+        return None
+    b64 = base64.b64encode(decoded)
+    armored = b"-----BEGIN SSH SIGNATURE-----\n" + b"\n".join(
+        b64[i : i + 70] for i in range(0, len(b64), 70)
+    ) + b"\n-----END SSH SIGNATURE-----\n"
+    return armored, payload
+
+
+def _verify_commit_signature(
+    repo: Path, sha: str, signers: Path
+) -> tuple[bool, str]:
+    """Real verification: `ssh-keygen -Y verify` against the allowed-
+    signers file, over the actual signature blob and payload (v5.1
+    §11.1 model A). Tries every principal in the file — the file IS the
+    authorised-principal list."""
+    import tempfile
+
+    extracted = _extract_ssh_signature(repo, sha)
+    if extracted is None:
+        return False, f"commit {sha[:12]} is not SSH-signed"
+    signature, payload = extracted
+    with tempfile.TemporaryDirectory() as tmp:
+        sig_file = Path(tmp) / "sig"
+        sig_file.write_bytes(signature)
+        for principal in _principals(signers):
+            proc = subprocess.run(
+                ["ssh-keygen", "-Y", "verify", "-f", str(signers),
+                 "-I", principal, "-n", "git", "-s", str(sig_file)],
+                input=payload, capture_output=True,
+            )
+            if proc.returncode == 0:
+                return True, f"verified against principal {principal!r}"
+    return False, (
+        f"signature on {sha[:12]} did not verify against any principal in "
+        f"{signers.name}"
+    )
+
+
 def _signers_ok(ctx: GateContext, commits: list[str]) -> tuple[bool, str]:
-    """Verify each commit that touched protected paths is signed by a
+    """Each commit that touched protected paths must be SSH-signed by a
     principal in the allowed-signers file (deployment model A)."""
     signers = ctx.repo / str(ctx.config.allowed_signers or ".quality/allowed_signers")
     if not signers.is_file():
         return False, f"allowed-signers file {signers} not found"
     for sha in commits:
-        show = subprocess.run(
-            ["git", "show", "-s", "--format=%G? %GS", sha],
-            cwd=str(ctx.repo), capture_output=True, text=True,
-        )
-        if show.returncode != 0:
-            return False, f"could not inspect commit {sha}"
-        status_line = show.stdout.strip()
-        if not status_line or status_line[0] in ("N", "E", "U", "B", "X", "Y"):
-            return False, f"commit {sha[:12]} is not validly signed ({status_line or 'no signature'})"
-        key = status_line.split(None, 1)[1] if " " in status_line else ""
-        verify = subprocess.run(
-            ["ssh-keygen", "-Y", "check-novalidate", "-n", "git",
-             "-s", "/dev/stdin"],
-            input=f"{key} git {sha}\n", capture_output=True, text=True,
-        )
-        if verify.returncode != 0:
-            return False, f"signature on {sha[:12]} did not verify"
+        ok, why = _verify_commit_signature(ctx.repo, sha, signers)
+        if not ok:
+            return False, why
     return True, ""
 
 
@@ -171,15 +256,15 @@ def integrity_gate(ctx: GateContext) -> GateResult:
     changed = protected_changes(ctx)
 
     failures: list[str] = []
+    verified_note: str | None = None
     if changed:
         if ctx.config.integrity_model == "A":
             commits = _commits_touching(ctx, changed)
             ok, why = _signers_ok(ctx, commits) if commits else (True, "")
             if ok:
-                failures.append(
-                    "protected paths changed with verified signatures: "
-                    + ", ".join(changed)
-                )
+                # §11.1 model A: a signed commit verified against the
+                # allowed-signers file IS the approval.
+                verified_note = why or "verified"
             else:
                 failures.append(f"protected paths changed without §11.1 approval ({why}): " + ", ".join(changed))
         else:
@@ -231,5 +316,8 @@ def integrity_gate(ctx: GateContext) -> GateResult:
         )
     return GateResult(
         name="integrity", status=GATE_PASS, mechanism=MECH_ABSOLUTE,
-        extra={"protected_paths_changed": []},
+        extra={
+            "protected_paths_changed": [],
+            **({"signature_verification": verified_note} if verified_note else {}),
+        },
     )

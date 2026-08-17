@@ -25,11 +25,14 @@ from ..conftest import TEMPLATES, run_git
 SCRATCH_TOOLCHAIN = """\
 schema_version = 1
 runner_version = "0.1.0"
+spec_version = "v5.1"
+addendum_version = "final"
 
 [tools]
 ruff = "0.16.3"
 pyright = "1.1.411"
 pytest = "9.1.1"
+pytest-cov = "7.0.0"
 semgrep = "1.173.0"
 xenon = "0.9.3"
 deptry = "0.25.1"

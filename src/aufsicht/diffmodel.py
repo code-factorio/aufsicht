@@ -47,9 +47,26 @@ def parse_unified_diff(text: str) -> tuple[set[str], dict[str, list[tuple[int, i
 
 
 def build_diff(repo: Path, base_sha: str) -> DiffModel:
-    """Diff of *base_sha* → working tree, plus untracked files."""
-    proc = gitutil.git("diff", "-U0", "--no-color", "--no-ext-diff", base_sha, cwd=repo)
+    """Diff of *base_sha* → working tree, plus untracked files.
+
+    ``--no-renames`` so a rename surfaces as deletion + addition: a
+    100%-similarity rename of a protected path (or of a violating
+    module) must not slip past the diff model. Deleted files are part
+    of ``changed_files`` — deleting AGENTS.md or .quality/allowlist.toml
+    is a protected-path change the integrity gate must see, and the -U0
+    hunk parser alone would drop it (its ``+++ /dev/null`` side carries
+    no added lines).
+    """
+    proc = gitutil.git(
+        "diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames",
+        base_sha, cwd=repo,
+    )
     changed, added = parse_unified_diff(proc.stdout)
+
+    # Name-only union: guarantees deletions are present even though
+    # they contribute no added lines.
+    for path in gitutil.changed_paths(base_sha, repo):
+        changed.add(path)
 
     # Untracked files: entirely new, so every line is an added line.
     for path in gitutil.untracked_files(repo):

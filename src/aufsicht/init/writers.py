@@ -171,6 +171,13 @@ def write_installation(
     )
     written.append("pyrightconfig.json")
 
+    # The §11.2 fallback: quality policy that must live in pyproject.toml
+    # is protected by a semantic section hash recorded here (itself a
+    # protected path). Only sections actually present are recorded.
+    config_hashes = _record_config_hashes(repo)
+    if config_hashes:
+        written.append(config_hashes)
+
     # Absorb an existing root ruff config by removing the old location.
     if detection.existing_ruff_config:
         old = repo / detection.existing_ruff_config
@@ -193,6 +200,26 @@ def write_installation(
     written.append("AGENTS.md")
 
     return written
+
+
+def _record_config_hashes(repo: Path) -> str | None:
+    """Record semantic hashes of every policy section present in
+    pyproject.toml (v5.1 §11.2 fallback; addendum §6 makes [tool.mutmut]
+    its first real user). Returns the written path or None."""
+    from ..integrity import POLICY_SECTIONS, pyproject_section_hash
+
+    recorded: dict[str, str] = {}
+    for section in POLICY_SECTIONS:
+        digest = pyproject_section_hash(repo / "pyproject.toml", section)
+        if digest and digest != "__unparseable__":
+            recorded[section] = digest
+    if not recorded:
+        return None
+    path = repo / ".quality" / "config-hashes.json"
+    path.write_text(
+        json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return ".quality/config-hashes.json"
 
 
 def _append_agents_section(repo: Path) -> None:

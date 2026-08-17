@@ -101,8 +101,10 @@ def merge_base(sha_a: str, sha_b: str, cwd: Path) -> str | None:
 
 def changed_paths(base: str, cwd: Path) -> list[str]:
     """Repo-relative POSIX paths changed between *base* and the working
-    tree (tracked changes only; untracked handled by the diff model)."""
-    proc = git("diff", "--name-only", "-z", base, cwd=cwd)
+    tree (tracked changes only; untracked handled by the diff model).
+    ``--no-renames`` so a rename reports both sides — the old side of a
+    renamed protected path must stay visible to the integrity gate."""
+    proc = git("diff", "--name-only", "-z", "--no-renames", base, cwd=cwd)
     return [p for p in proc.stdout.split("\0") if p]
 
 

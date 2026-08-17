@@ -56,6 +56,8 @@ class Toolchain:
     tools: dict[str, str]
     runner_version: str | None
     raw_hash: str  # sha256 of the file bytes — the analyzer-env cache key
+    spec_version: str | None = None
+    addendum_version: str | None = None
 
     def pin(self, tool: str) -> str | None:
         return self.tools.get(tool)
@@ -109,6 +111,8 @@ def load_toolchain(repo: Path) -> Toolchain:
         tools=tools,
         runner_version=runner_version,
         raw_hash=hashlib.sha256(path.read_bytes()).hexdigest(),
+        spec_version=data.get("spec_version"),
+        addendum_version=data.get("addendum_version"),
     )
 
 
@@ -244,9 +248,14 @@ def _build_env_in_place(
             build(env)
             (env / ".aufsicht-ok").write_text("built-by-aufsicht\n", encoding="utf-8")
             if not _env_complete(env, tools):
+                missing = [t for t in tools if not (_bin_dir(env) / t).exists()]
+                detail = (
+                    f"missing entry points for {missing}"
+                    if missing
+                    else "entry-point shebangs are broken (interpreter path does not exist)"
+                )
                 raise ToolingError(
-                    f"environment {env.name} incomplete after build "
-                    f"(missing entry points for {tools})",
+                    f"environment {env.name} incomplete after build ({detail})",
                     remedy="Check the pinned versions and network access.",
                 )
     finally:
@@ -257,12 +266,20 @@ def _build_env_in_place(
     return env
 
 
+# Pinned packages that ship no console script (pytest plugins are
+# imported, not executed): they cannot be verified via bin/<name>, so
+# they are excluded from the entry-point completeness check.
+PLUGIN_ONLY_TOOLS = frozenset({"pytest-cov"})
+
+
 def _ensure_env(
     root: Path, key: str, pins: list[str], *, python: str | None = None
 ) -> Path:
     """Return a ready env at *root/key*, building it once."""
-    tools = [p.split("==")[0] for p in pins]
-    return _build_env_in_place(root / key, tools, lambda env: _create_env(env, pins, python=python))
+    entry_points = [p.split("==")[0] for p in pins if p.split("==")[0] not in PLUGIN_ONLY_TOOLS]
+    return _build_env_in_place(
+        root / key, entry_points, lambda env: _create_env(env, pins, python=python)
+    )
 
 
 def analyzer_env(lock: Toolchain, cache: Path | None = None) -> Path:
@@ -314,19 +331,39 @@ def project_env_key(repo: Path) -> tuple[str, str]:
     return h.hexdigest()[:24], lockfile
 
 
+def project_env_pins(lock: Toolchain) -> tuple[str, ...]:
+    """The pins installed into every project env: the test runner and
+    its coverage plugin (v5.1 §19: pytest with branch coverage in the
+    gate). Order is part of the install command, not the identity."""
+    pins: list[str] = []
+    if lock.pin("pytest"):
+        pins.append(f"pytest=={lock.pin('pytest')}")
+    else:
+        pins.append("pytest")
+    if lock.pin("pytest-cov"):
+        pins.append(f"pytest-cov=={lock.pin('pytest-cov')}")
+    return tuple(pins)
+
+
 def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
     """Project dependency environment for the checkout at *repo*.
 
     Contains the project's third-party dependencies (resolved from this
-    checkout's own lockfile/pyproject) plus the pinned pytest — never
-    the project code itself, which changes per commit and is made
-    importable via the pytest config's pythonpath instead.
+    checkout's own lockfile/pyproject) plus the pinned pytest and
+    coverage plugin — never the project code itself, which changes per
+    commit and is made importable via the pytest config's pythonpath
+    instead. The cache key includes the env's own pins so a pin bump
+    rebuilds rather than reusing an env that lacks the new plugin.
     """
     cache = cache or cache_dir()
-    key, _lockfile = project_env_key(repo)
+    files_key, _lockfile = project_env_key(repo)
     root = cache / "projenvs"
     root.mkdir(parents=True, exist_ok=True)
-    pytest_pin = f"pytest=={lock.pin('pytest')}" if lock.pin("pytest") else "pytest"
+    pins = project_env_pins(lock)
+    pin_key = hashlib.sha256("\n".join(pins).encode()).hexdigest()[:12]
+    entry_points = [
+        p.split("==")[0] for p in pins if p.split("==")[0] not in PLUGIN_ONLY_TOOLS
+    ]
 
     def build(env: Path) -> None:
         if _have_uv():
@@ -334,25 +371,30 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
             install = [
                 "uv", "pip", "install", "--quiet",
                 "--python", str(_bin_dir(env) / "python"),
-                "-r", "pyproject.toml", pytest_pin,
+                "-r", "pyproject.toml", *pins,
             ]
             proc = subprocess.run(install, cwd=str(repo), capture_output=True, text=True, timeout=900)
             if proc.returncode != 0:
                 # A project may have no dependencies at all; fall back to
-                # pytest only rather than failing the whole gate.
-                _run(install[:-2])  # pytest pin only
+                # the pins only rather than failing the whole gate.
+                _run(install[: -len(pins)] + list(pins))
         else:
             base = shutil.which("python3") or shutil.which("python")
             if base is None:
                 raise ToolingError("neither uv nor python3 is available to build environments")
             _run([base, "-m", "venv", str(env)])
             _run([str(_bin_dir(env) / "python"), "-m", "pip", "install",
-                  "--quiet", "--disable-pip-version-check", pytest_pin])
+                  "--quiet", "--disable-pip-version-check", *pins])
 
-    return _build_env_in_place(root / f"proj-{key}", ["pytest"], build)
+    return _build_env_in_place(
+        root / f"proj-{files_key}-{pin_key}", entry_points, build
+    )
 
 
 def project_lockfile_differs(base_repo: Path, head_repo: Path) -> bool:
     """True when the project dependency resolution differs between the
-    two checkouts (v5.1 §4.4: exempt Pyright and deptry, flag the run)."""
-    return project_env_key(base_repo) != project_env_key(head_repo)
+    two checkouts (v5.1 §4.4: exempt Pyright and deptry, flag the run).
+    Compares the project files hash only — NOT the env's tool pins, so
+    a toolchain bump does not masquerade as a dependency-environment
+    change."""
+    return project_env_key(base_repo)[0] != project_env_key(head_repo)[0]

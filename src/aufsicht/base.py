@@ -73,10 +73,10 @@ def resolve_base(repo: Path, config: QualityConfig) -> BaseRef:
 
     head = gitutil.head_sha(repo)
 
-    # 1. CI-provided base (env candidates first, then the spec's
-    #    QUALITY_BASE_REF spelling as an env override).
-    candidates: tuple[str, ...] = tuple(config.base_ci_env) + ("QUALITY_BASE_REF",)
-    for var in candidates:
+    # 1. CI-provided base. Only CI variables here — QUALITY_BASE_REF is
+    #    a config-file key per v5.1 §4.6, not an environment variable
+    #    an incidental shell export could override.
+    for var in tuple(config.base_ci_env):
         value = os.environ.get(var, "").strip()
         if not value:
             continue

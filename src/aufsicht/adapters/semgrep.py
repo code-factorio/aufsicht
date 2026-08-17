@@ -191,8 +191,14 @@ def no_verification_findings(
     return violations
 
 
-def _changed_python_files(diff: DiffModel) -> list[str]:
-    return sorted(p for p in diff.changed_files if p.endswith(".py"))
+def _changed_python_files(diff: DiffModel, repo: Path | None = None) -> list[str]:
+    """Changed .py files that exist in the working tree — a renamed or
+    deleted path's old side is not a scannable root (semgrep exits 2 on
+    it); deletions are the integrity gate's subject."""
+    files = sorted(p for p in diff.changed_files if p.endswith(".py"))
+    if repo is None:
+        return files
+    return [p for p in files if (repo / p).is_file()]
 
 
 @gate("semgrep")
@@ -212,7 +218,7 @@ def semgrep_gate(ctx: GateContext) -> GateResult:
                    "anti-evasion rules (v5.1 §9)",
         )
 
-    targets = _changed_python_files(ctx.diff)
+    targets = _changed_python_files(ctx.diff, ctx.repo)
     if not targets:
         return GateResult(
             name="semgrep", status=GATE_PASS, mechanism=MECH_DIFF,

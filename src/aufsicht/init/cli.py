@@ -334,7 +334,11 @@ def run_init(repo: Path, *, dry_run: bool, force: bool, as_json: bool, write: bo
             "(never the default branch).",
             file=sys.stderr,
         )
-        if warnings or probe_report.warnings:
+        # Exit 2 is strictly "a probe forced a narrower configuration"
+        # (§5.2). Other warnings (probe failures, pre-existing gate
+        # failures surfaced honestly by verify) stay in the plan and
+        # verify output with exit 0.
+        if probe_report.warnings:
             return 2
         return 0
     except RefusalError as exc:

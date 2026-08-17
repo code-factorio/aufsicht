@@ -49,6 +49,20 @@ def _proposed_contents(repo: Path) -> dict[str, str]:
     config_path = repo / ".quality" / "config.toml"
     if config_path.is_file():
         proposals[".quality/config.toml"] = _carry_config(config_path, detection)
+
+    # Refresh the §11.2 section-hash fallback for any policy sections
+    # present in pyproject.toml (first real user: [tool.mutmut], Tier 3).
+    from .integrity import POLICY_SECTIONS, pyproject_section_hash
+
+    recorded: dict[str, str] = {}
+    for section in POLICY_SECTIONS:
+        digest = pyproject_section_hash(repo / "pyproject.toml", section)
+        if digest and digest != "__unparseable__":
+            recorded[section] = digest
+    if recorded:
+        proposals[".quality/config-hashes.json"] = (
+            json.dumps(recorded, indent=2, sort_keys=True) + "\n"
+        )
     return proposals
 
 

@@ -49,3 +49,6 @@ max-complexity = 10
 # S101 (bare assert) is deliberately absent from the S list — pytest is
 # built on assert — but tests may still trip S105/S106/S311 legitimately.
 "tests/**" = ["S101", "S105", "S106", "S311"]
+# Gate-status string constants ("pass"/"fail") trip S105's
+# hardcoded-password heuristic; they are report vocabulary, not secrets.
+"src/aufsicht/model.py" = ["S105"]
