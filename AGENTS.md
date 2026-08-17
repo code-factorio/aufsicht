@@ -18,6 +18,16 @@ is integrity-protected. It is not, by design, and that exception is
 recorded here precisely so it does not become an implicit security
 assumption.
 
+## Releases: every green push to main publishes (distribution spec §10, §14)
+
+CI publishes to PyPI after a green `quality-full` run. There is no
+release day: a merge to main that does not increase the runner version
+fails the publish job with instructions. The version lives in five
+places — `pyproject.toml`, `src/aufsicht/__init__.py`,
+`install/bootstrap.sh`, `skill/scripts/bootstrap.sh` (the byte-identical
+pair), `.quality/toolchain.lock` — bump all five in the same commit,
+semver per distribution spec §10.
+
 <!-- aufsicht:begin (do not edit outside these delimiters; appended by `aufsicht init`) -->
 
 ## Quality guardrails (aufsicht)
