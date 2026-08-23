@@ -69,6 +69,11 @@ jobs:
   publish:
     needs: quality-full
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # The PyPI trusted publisher is registered with an environment, so
+    # the OIDC token must carry the matching `environment` claim. Without
+    # this the claim is MISSING and the exchange fails `invalid-publisher`
+    # even though the repository, workflow and ref all match.
+    environment: pypi
     permissions:
       contents: read
       id-token: write  # PyPI trusted publishing (OIDC)
