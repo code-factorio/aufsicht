@@ -39,7 +39,8 @@ GIT_ENV = {
 # CI sets GITHUB_BASE_REF on every pull_request run. Tests must not see
 # the host's values — neither in-process nor in scratch CLI runs.
 CI_BASE_VARS = (
-    "GITHUB_BASE_SHA", "GITHUB_BASE_REF",
+    "GITHUB_BASE_SHA",
+    "GITHUB_BASE_REF",
     "CI_MERGE_REQUEST_DIFF_BASE_SHA",
     "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
     "QUALITY_BASE_REF",
@@ -61,17 +62,13 @@ def no_ci_base_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def run_git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
     env = {**os.environ, **GIT_ENV}
-    proc = subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env
-    )
+    proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env)
     if check and proc.returncode != 0:
         raise AssertionError(f"git {args} failed: {proc.stderr}")
     return proc
 
 
-def run_cli(
-    *args: str, cwd: Path, timeout: int = 1200
-) -> subprocess.CompletedProcess:
+def run_cli(*args: str, cwd: Path, timeout: int = 1200) -> subprocess.CompletedProcess:
     """Invoke the real CLI: `python -m aufsicht <args>` in *cwd*."""
     env = {
         **os.environ,
@@ -88,7 +85,11 @@ def run_cli(
     }
     return subprocess.run(
         [sys.executable, "-m", "aufsicht", *args],
-        cwd=str(cwd), capture_output=True, text=True, env=env, timeout=timeout,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=timeout,
     )
 
 
