@@ -35,6 +35,29 @@ GIT_ENV = {
     "GIT_CONFIG_SYSTEM": "/dev/null",
 }
 
+# Base-resolution reads these before [base] ref (v5.1 §4.6), so a real
+# CI sets GITHUB_BASE_REF on every pull_request run. Tests must not see
+# the host's values — neither in-process nor in scratch CLI runs.
+CI_BASE_VARS = (
+    "GITHUB_BASE_SHA", "GITHUB_BASE_REF",
+    "CI_MERGE_REQUEST_DIFF_BASE_SHA",
+    "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+    "QUALITY_BASE_REF",
+)
+
+
+@pytest.fixture(autouse=True)
+def no_ci_base_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide the host CI's base variables from every in-process test.
+
+    run_cli blanks them for scratch subprocesses; without this fixture
+    the same variables leak into tests that call resolve_base directly,
+    and the suite fails on any pull_request event (where GitHub always
+    sets GITHUB_BASE_REF).
+    """
+    for var in CI_BASE_VARS:
+        monkeypatch.delenv(var, raising=False)
+
 
 def run_git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
     env = {**os.environ, **GIT_ENV}
@@ -61,12 +84,7 @@ def run_cli(
         "AUFSICHT_CACHE_DIR": str(TEST_CACHE),
         # No CI variables leak into scratch runs; base resolution goes
         # through [base] ref in the scratch config.
-        **{k: "" for k in (
-            "GITHUB_BASE_SHA", "GITHUB_BASE_REF",
-            "CI_MERGE_REQUEST_DIFF_BASE_SHA",
-            "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
-            "QUALITY_BASE_REF",
-        )},
+        **{k: "" for k in CI_BASE_VARS},
     }
     return subprocess.run(
         [sys.executable, "-m", "aufsicht", *args],
