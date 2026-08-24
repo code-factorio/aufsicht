@@ -16,7 +16,8 @@ venv/
 coverage-report/
 
 # Session-local agent artifacts
-.claude/
+.claude/*
+!.claude/skills
 
 # aufsicht runtime caches live outside the repo (~/.cache/aufsicht);
 # nothing here should ever hold gate state (v5.1 §4.3: base counts are
