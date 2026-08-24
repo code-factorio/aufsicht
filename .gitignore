@@ -22,3 +22,4 @@ coverage-report/
 # nothing here should ever hold gate state (v5.1 §4.3: base counts are
 # computed, never committed).
 .rohrpost/tickets.jsonl
+.rohrpost/.lock
