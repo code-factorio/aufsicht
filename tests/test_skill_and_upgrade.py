@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 import stat
-from pathlib import Path
 
 from tests.conftest import REPO_ROOT, run_cli
 from tests.fixtures.scratch import make_repo
@@ -40,8 +39,9 @@ class TestBootstrapIdentity:
         assert "exec aufsicht init" in text
         # Thin, per distribution spec §9: the bootstrap never writes
         # guardrail configuration itself.
-        assert not re.search(r"(mkdir|touch|cat\s*>|tee)\s.*\.quality", text), \
+        assert not re.search(r"(mkdir|touch|cat\s*>|tee)\s.*\.quality", text), (
             "bootstrap must not write .quality/ itself"
+        )
 
     def test_pinned_version_matches_runner(self):
         from aufsicht import __version__
@@ -59,9 +59,7 @@ class TestVersionConsistency:
 
         from aufsicht import __version__
 
-        pyproject = tomllib.loads(
-            (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        )
+        pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         assert pyproject["project"]["version"] == __version__
 
 
@@ -77,8 +75,16 @@ class TestSkillMd:
         # distribution spec §2: could it become wrong when the runner
         # is upgraded? Then it does not belong in the skill.
         banned = [
-            "ratchet", "threshold", "<no-rule>", "C901", "S307", "PGH",
-            "per-rule", "exit code", "report field", "DEP0",
+            "ratchet",
+            "threshold",
+            "<no-rule>",
+            "C901",
+            "S307",
+            "PGH",
+            "per-rule",
+            "exit code",
+            "report field",
+            "DEP0",
         ]
         for path in SKILL_MD.parent.rglob("*"):
             if not path.is_file():
@@ -100,7 +106,7 @@ class TestUpgrade:
         lock = repo / ".quality" / "toolchain.lock"
         lock.write_text(
             lock.read_text(encoding="utf-8").replace(
-                'runner_version = "0.1.0"', 'runner_version = "0.0.9"'
+                'runner_version = "0.2.0"', 'runner_version = "0.0.9"'
             ),
             encoding="utf-8",
         )

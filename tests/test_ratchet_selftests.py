@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from tests.conftest import run_cli
 from tests.fixtures.scratch import SCRATCH_TOOLCHAIN, commit, make_repo
 from tests.test_selftests import run_full
@@ -143,7 +141,7 @@ class TestExemptions:
         # distribution spec §10: a runner upgrade is a toolchain bump —
         # exempt the affected analyzers for that PR and say so.
         repo = self._repo(tmp_path, "runner-bump")
-        bumped = SCRATCH_TOOLCHAIN.replace('runner_version = "0.1.0"', 'runner_version = "0.2.0"')
+        bumped = SCRATCH_TOOLCHAIN.replace('runner_version = "0.2.0"', 'runner_version = "0.3.0"')
         commit(repo, {".quality/toolchain.lock": bumped}, "upgrade runner", branch="feature")
         _code, report = run_full(repo)
         assert "ruff" in report["exempt_tools"]

@@ -29,7 +29,7 @@ repository — never in the skill, never in prose an agent paraphrases.
 ## Install
 
 ```bash
-uv tool install aufsicht==0.1.0        # or: pipx install aufsicht==0.1.0
+uv tool install aufsicht==0.2.0        # or: pipx install aufsicht==0.2.0
 cd /path/to/existing/repo
 aufsicht init                          # detect → probe → propose → write → verify
 ```
