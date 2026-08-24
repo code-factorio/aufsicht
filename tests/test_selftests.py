@@ -203,21 +203,21 @@ class TestSuppressionScan:
     def test_type_ignore_on_added_line(self, tmp_path):
         # §18: "# type: ignore on an added line → added-line scan / PGH003"
         repo = make_repo(tmp_path / "typeignore")
-        commit(
-            repo,
-            {
-                "src/scratch/app.py": (
-                    "def add(a: int, b: int) -> int:\n"
-                    "    return a + b  # type: ignore\n"
-                    "\n"
-                    "\n"
-                    "def greet(name: str) -> str:\n"
-                    '    return f"hello {name}"\n'
-                ),
-            },
-            "suppress",
-            branch="feature",
-        )
+        # The string lines below stay byte-identical to the base commit:
+        # the suppressions gate scans ADDED lines textually, and this
+        # fixture must embed a type-ignore comment without becoming a
+        # finding itself.
+        files = {
+            "src/scratch/app.py": (
+                "def add(a: int, b: int) -> int:\n"
+                "    return a + b  # type: ignore\n"
+                "\n"
+                "\n"
+                "def greet(name: str) -> str:\n"
+                '    return f"hello {name}"\n'
+            ),
+        }
+        commit(repo, files, "suppress", branch="feature")
         code, report = run_full(repo)
         # The gate is named "suppressions" in this runner; mechanism is
         # diff-scoped per the v5.1 §3 table (added-line scan + PGH).
@@ -230,35 +230,31 @@ class TestSuppressionScan:
         assert code == 1
 
     def test_legacy_type_ignore_not_flagged(self, tmp_path):
-        repo = make_repo(
-            tmp_path / "legacy-suppress",
-            app=(
+        # Fixture lines stay byte-identical to the base commit (see the
+        # comment in test_type_ignore_on_added_line).
+        app = (
+            "def add(a: int, b: int) -> int:\n"
+            "    return a + b  # type: ignore\n"
+            "\n"
+            "\n"
+            "def greet(name: str) -> str:\n"
+            '    return f"hello {name}"\n'
+        )
+        repo = make_repo(tmp_path / "legacy-suppress", app=app)
+        files = {
+            "src/scratch/app.py": (
                 "def add(a: int, b: int) -> int:\n"
                 "    return a + b  # type: ignore\n"
                 "\n"
                 "\n"
                 "def greet(name: str) -> str:\n"
                 '    return f"hello {name}"\n'
+                "\n"
+                "\n"
+                "def farewell(name: str) -> str:\n"
+                '    return f"bye {name}"\n'
             ),
-        )
-        commit(
-            repo,
-            {
-                "src/scratch/app.py": (
-                    "def add(a: int, b: int) -> int:\n"
-                    "    return a + b  # type: ignore\n"
-                    "\n"
-                    "\n"
-                    "def greet(name: str) -> str:\n"
-                    '    return f"hello {name}"\n'
-                    "\n"
-                    "\n"
-                    "def farewell(name: str) -> str:\n"
-                    '    return f"bye {name}"\n'
-                ),
-            },
-            "unrelated change",
-            branch="feature",
-        )
+        }
+        commit(repo, files, "unrelated change", branch="feature")
         _code, report = run_full(repo)
         assert report["gates"]["suppressions"]["status"] == "pass", report["gates"]["suppressions"]

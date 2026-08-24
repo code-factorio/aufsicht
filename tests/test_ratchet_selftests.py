@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tests.conftest import run_cli
 from tests.fixtures.scratch import SCRATCH_TOOLCHAIN, commit, make_repo
 from tests.test_selftests import run_full
