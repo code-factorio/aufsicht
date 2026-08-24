@@ -4,6 +4,13 @@
 # fetch-depth: 0 is load-bearing, not cosmetic (v5.1 §4.6): the default
 # shallow checkout makes `git merge-base` fail or lie, and the gate
 # exits 3 rather than silently disable every ratchet.
+#
+# Layout: quality-full (the gate) and self-test (the suite on the job
+# interpreter, distribution §8) are separate jobs so they run in
+# parallel — together they were >7 minutes sequential, and the suite
+# is the dominant cost of both. Both share one analyzer-environment
+# cache (envs are content-keyed on lock hashes and self-heal, so a
+# stale restore rebuilds instead of misbehaving).
 name: aufsicht
 
 on:
@@ -13,6 +20,14 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # One cache root for the gate, the suite, and every scratch repo the
+  # self-tests spawn (conftest.py routes AUFSICHT_TEST_CACHE into the
+  # scratch CLIs). Environments are keyed on toolchain-lock / project
+  # pin hashes, so sharing across jobs and runs is safe by design.
+  AUFSICHT_CACHE_DIR: /home/runner/.cache/aufsicht
+  AUFSICHT_TEST_CACHE: /home/runner/.cache/aufsicht
 
 jobs:
   quality-full:
@@ -26,6 +41,26 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Analyzer + project environments (v5.1 §4.4) are the expensive
+      # part of a cold run: semgrep, pyright's node runtime, and the
+      # per-scratch-repo envs the self-tests freeze through uv. They
+      # are keyed on lock hashes and self-heal on broken shebangs, so
+      # restoring a stale cache costs a rebuild, never a wrong result.
+      # Blacksmith serves actions/cache from its colocated cache.
+      - name: Restore analyzer environments
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/.cache/aufsicht/envs
+            /home/runner/.cache/aufsicht/projenvs
+            /home/runner/.cache/uv
+            /home/runner/.cache/pip
+            /home/runner/.cache/pyscn
+            /home/runner/.cache/pip-audit
+          key: aufsicht-envs-${{ runner.os }}-${{ hashFiles('.quality/toolchain.lock', 'uv.lock', 'pyproject.toml') }}
+          restore-keys: |
+            aufsicht-envs-${{ runner.os }}-
+
       # Self-hosting (distribution spec §7): this repository runs its
       # own guardrails FROM THE WORKING TREE, not the published version.
       # Target repositories install the pinned runner from the index
@@ -33,24 +68,16 @@ jobs:
       # uv ships with the runner install (v5.1 §4.4: uv is the supported
       # resolver — the pip-audit gate exits 3 without it, and the
       # self-tests spawn the CLI in scratch repos that freeze through it).
-      # pytest is the dev dependency-group: the gate runs pytest inside
-      # its own pinned analyzer env, but the self-test step below runs
-      # the suite with this interpreter.
       - name: Install the runner from the working tree
         run: |
           python -m pip install --upgrade pip
-          python -m pip install . uv pytest
+          python -m pip install . uv
 
       - name: quality-full
         shell: bash
         run: |
           set -o pipefail
           aufsicht full | tee aufsicht-report.json
-
-      - name: Runner self-test suite (v5.1 §18 / distribution §8)
-        env:
-          AUFSICHT_CACHE_DIR: ${{ runner.temp }}/aufsicht-cache
-        run: python -m pytest tests -q
 
       - name: Upload report
         if: always()
@@ -59,15 +86,58 @@ jobs:
           name: aufsicht-report
           path: aufsicht-report.json
 
+  # Runner self-test suite (v5.1 §18 / distribution §8): the same suite
+  # the gate already runs from its pinned project env, executed here
+  # with the job interpreter. Its tests are isolated scratch repos
+  # (tmp_path each) and the env cache takes a build lock, so xdist
+  # workers are safe (measured: serial and -n 4 produce identical
+  # results, ~3.4x faster wall-clock on 4 cores).
+  self-test:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore analyzer environments
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/.cache/aufsicht/envs
+            /home/runner/.cache/aufsicht/projenvs
+            /home/runner/.cache/uv
+            /home/runner/.cache/pip
+            /home/runner/.cache/pyscn
+            /home/runner/.cache/pip-audit
+          key: aufsicht-envs-${{ runner.os }}-${{ hashFiles('.quality/toolchain.lock', 'uv.lock', 'pyproject.toml') }}
+          restore-keys: |
+            aufsicht-envs-${{ runner.os }}-
+
+      # pytest is the dev dependency-group: this step runs the suite
+      # with the job interpreter (the gate runs it again inside its own
+      # pinned project env — that copy needs no install here).
+      - name: Install the runner from the working tree
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . uv pytest pytest-xdist
+
+      - name: Runner self-test suite
+        run: python -m pytest tests -q -n auto
+
   # Publishing (distribution spec §14's open decision, resolved: the
   # index is the channel). Runs only from main and only after a green
-  # quality-full, so merging to main IS the release decision — the
-  # same reviewed-PR approval act the protected paths already use.
+  # quality-full AND self-test, so merging to main IS the release
+  # decision — the same reviewed-PR approval act the protected paths
+  # already use.
   # Credentials are trusted publishing (OIDC): no token in the repo.
   # PyPI must list this repository as a trusted publisher with
   # workflow name "aufsicht" (and no environment).
   publish:
-    needs: quality-full
+    needs: [quality-full, self-test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # The PyPI trusted publisher is registered with an environment, so
     # the OIDC token must carry the matching `environment` claim. Without
