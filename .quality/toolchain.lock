@@ -2,7 +2,7 @@
 # that can bump Ruff can shift every ratchet reference without
 # touching a threshold. Exact versions, never ranges.
 schema_version = 1
-runner_version = "0.1.0"
+runner_version = "0.2.0"
 spec_version = "v5.1"
 addendum_version = "final"
 

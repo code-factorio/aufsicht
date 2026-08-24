@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from .base import BaseRef, resolve_base
 from .config import QualityConfig, cache_dir
@@ -27,23 +27,40 @@ MODE_FULL = "full"
 # Gate order. Integrity first, always (v5.1 §11.3).
 GATE_ORDER: dict[str, tuple[str, ...]] = {
     MODE_FAST: (
-        "integrity", "ruff", "ruff-s", "suppressions", "complexity",
-        "pyright-fast", "semgrep", "pytest",
+        "integrity",
+        "ruff",
+        "ruff-s",
+        "suppressions",
+        "complexity",
+        "pyright-fast",
+        "semgrep",
+        "pytest",
     ),
     MODE_FULL: (
-        "integrity", "ruff", "ruff-s", "suppressions", "complexity",
-        "pyright", "pytest", "semgrep", "xenon", "cycles", "deadcode",
-        "deptry", "pip-audit",
+        "integrity",
+        "ruff",
+        "ruff-s",
+        "suppressions",
+        "complexity",
+        "pyright",
+        "pytest",
+        "semgrep",
+        "xenon",
+        "cycles",
+        "deadcode",
+        "deptry",
+        "pip-audit",
     ),
 }
 
-REGISTRY: dict[str, Callable[["GateContext"], GateResult]] = {}
+REGISTRY: dict[str, Callable[[GateContext], GateResult]] = {}
 
 
 def gate(name: str) -> Callable:
-    def register(fn: Callable[["GateContext"], GateResult]) -> Callable:
+    def register(fn: Callable[[GateContext], GateResult]) -> Callable:
         REGISTRY[name] = fn
         return fn
+
     return register
 
 
@@ -70,7 +87,7 @@ class GateContext:
             raise ToolingError(
                 f"{tool} is not pinned in .quality/toolchain.lock",
                 remedy="Add an exact version pin and re-run "
-                       "(v5.1 §4.4: gates execute tools from the lock, and no other).",
+                "(v5.1 §4.4: gates execute tools from the lock, and no other).",
             )
         return tool_exe(self.env, tool)
 
@@ -84,14 +101,17 @@ class GateContext:
         cmd = [str(self.exe(tool)), *args]
         try:
             return subprocess.run(
-                cmd, cwd=str(cwd or self.repo), capture_output=True,
-                text=True, timeout=timeout,
+                cmd,
+                cwd=str(cwd or self.repo),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             raise ToolingError(
                 f"{tool} timed out after {timeout}s",
                 remedy="Narrow scope or raise the tool timeout in CI; a "
-                       "timeout is inconclusive, never a pass.",
+                "timeout is inconclusive, never a pass.",
             ) from exc
 
     def is_ratchet_exempt(self, tool: str) -> bool:
@@ -132,6 +152,7 @@ def run_pipeline(repo: Path, mode: str) -> Report:
     # Ratchet exemptions (v5.1 §4.5) are computed before gates run, so
     # every ratcheted adapter can consult them.
     from .exemptions import compute_exemptions
+
     try:
         compute_exemptions(ctx)
     except ToolingError as exc:
@@ -140,33 +161,50 @@ def run_pipeline(repo: Path, mode: str) -> Report:
         return report
 
     for name in GATE_ORDER[mode]:
+        gate_started = time.monotonic()
         if name in ctx.config.disabled_gates:
             report.gates.append(
-                GateResult(name=name, status="skipped", mechanism="absolute",
-                           detail=f"disabled in .quality/config.toml [gates]")
+                GateResult(
+                    name=name,
+                    status="skipped",
+                    mechanism="absolute",
+                    detail="disabled in .quality/config.toml [gates]",
+                    extra={"duration": 0.0},
+                )
             )
             continue
         fn = REGISTRY.get(name)
         if fn is None:
             report.gates.append(
-                GateResult(name=name, status="skipped", mechanism="absolute",
-                           detail="gate not implemented by this runner version")
+                GateResult(
+                    name=name,
+                    status="skipped",
+                    mechanism="absolute",
+                    detail="gate not implemented by this runner version",
+                    extra={"duration": 0.0},
+                )
             )
             continue
         try:
-            report.gates.append(fn(ctx))
+            result = fn(ctx)
+            # Wall-clock cost of this gate, analyzer subprocesses included
+            # (report schema key `duration`; no adapter sets that extra
+            # key, so the merge in GateResult.to_dict cannot collide).
+            # Skipped entries carry 0.0: no work ran.
+            result.extra["duration"] = round(time.monotonic() - gate_started, 2)
+            report.gates.append(result)
         except ToolingError as exc:
             report.tooling_error = exc
             break
-        except Exception as exc:  # noqa: BLE001 — the report is the interface (v5.1 §15)
+        except Exception as exc:  # the report is the interface (v5.1 §15)
             # A gate crashing must still produce a JSON report with the
             # partial results and exit 3; dying with a traceback and no
             # stdout violates the contract that an agent can parse.
             report.tooling_error = ToolingError(
                 f"gate {name} crashed: {type(exc).__name__}: {exc}",
                 remedy="This is a runner bug or a broken analyzer "
-                       "invocation — report it against the aufsicht runner "
-                       f"version in the report.",
+                "invocation — report it against the aufsicht runner "
+                "version in the report.",
             )
             break
 
