@@ -20,9 +20,15 @@ from pathlib import Path
 
 from ..conftest import TEMPLATES, run_git
 
-# The analyzer pins used by scratch repositories. Same content across
-# scratch repos → one shared analyzer environment per machine.
+# The analyzer pins used by scratch repositories. Byte-identical to the
+# repo's .quality/toolchain.lock (pinned by a regression test): the
+# analyzer-env cache key is sha256 of the lock bytes, so byte identity
+# makes every scratch run share the repo's analyzer environment — one
+# env, one cache entry, no second cold build per suite run.
 SCRATCH_TOOLCHAIN = """\
+# Analyzer pins (v5.1 §4.4). Protected path (§11.2): an agent
+# that can bump Ruff can shift every ratchet reference without
+# touching a threshold. Exact versions, never ranges.
 schema_version = 1
 runner_version = "0.1.0"
 spec_version = "v5.1"
