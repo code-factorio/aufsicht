@@ -156,12 +156,15 @@ def run_suite(
     """
     env_dir = project_env(ctx.repo, ctx.lock, ctx.cache)
     python = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    # Config runner_args come first so the adapter's canonical flags
-    # win where they collide: the summary format IS the parse contract.
+    # [tests] runner_args (e.g. xdist's "-n auto", CI-speed plan M3)
+    # are pytest arguments: they follow "-m pytest" — ahead of it they
+    # would land on the interpreter, not the runner — and precede the
+    # adapter's canonical flags so those win where they collide: the
+    # summary format IS the parse contract.
     args = [
-        *ctx.config.tests_runner_args,
         "-m",
         "pytest",
+        *ctx.config.tests_runner_args,
         "-c",
         ".quality/pytest.ini",
         "--rootdir",
@@ -222,9 +225,7 @@ def run_suite(
             "must not kill the runner.",
             EXIT_USAGE: "Check .quality/pytest.ini and [tests] runner_args in "
             ".quality/config.toml.",
-        }.get(
-            proc.returncode, "Re-run the suite by hand to diagnose the internal error."
-        )
+        }.get(proc.returncode, "Re-run the suite by hand to diagnose the internal error.")
         raise ToolingError(
             f"pytest exited {proc.returncode} ({meaning}) — the run is "
             f"inconclusive, neither a pass nor a fail. Last output: {excerpt!r}",
@@ -262,8 +263,7 @@ def parse_summary(stdout: str) -> list[Finding]:
         elif symbol is None:
             rule = "pytest/collection"
             message = (
-                reason
-                or "collection error (import/syntax) — run pytest by hand for the traceback"
+                reason or "collection error (import/syntax) — run pytest by hand for the traceback"
             )
         else:
             rule = "pytest/error"
@@ -303,13 +303,9 @@ def discover_test_files(repo: Path) -> list[str]:
     """Every test file in the repository, repo-relative POSIX paths."""
     out: list[str] = []
     for root, dirs, files in os.walk(repo):
-        dirs[:] = sorted(
-            d for d in dirs if not d.startswith(".") and d not in _PRUNE_DIRS
-        )
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in _PRUNE_DIRS)
         for name in sorted(files):
-            if (name.startswith("test_") and name.endswith(".py")) or name.endswith(
-                "_test.py"
-            ):
+            if (name.startswith("test_") and name.endswith(".py")) or name.endswith("_test.py"):
                 out.append((Path(root) / name).relative_to(repo).as_posix())
     return sorted(out)
 
@@ -381,36 +377,44 @@ def _budget_extra(ctx: GateContext, elapsed: float) -> dict:
     return extra
 
 
+def _fast_selection(ctx: GateContext) -> tuple[list[str], GateResult | None]:
+    """quality-fast scope: the affected test files, or the skip result
+    that ends the gate before a run. ``[fast] pytest = "off"`` is the
+    install probe's narrowing decision, not a gate bypass (v5.1 §5)."""
+    if ctx.config.fast_pytest == "off":
+        return [], GateResult(
+            name="pytest",
+            status=GATE_SKIPPED,
+            mechanism=MECH_ABSOLUTE,
+            detail='[fast] pytest = "off" — the install probe narrowed the '
+            "fast scope; tests run in quality-full only (v5.1 §5)",
+        )
+    paths = affected_test_files(ctx.repo, ctx.diff)
+    if not paths:
+        return [], GateResult(
+            name="pytest",
+            status=GATE_SKIPPED,
+            mechanism=MECH_ABSOLUTE,
+            detail="no affected tests",
+        )
+    return paths, None
+
+
 @gate("pytest")
 def pytest_gate(ctx: GateContext) -> GateResult:
     extra: dict = {}
     paths: list[str] | None = None
 
     if ctx.mode == MODE_FAST:
-        if ctx.config.fast_pytest == "off":
-            return GateResult(
-                name="pytest",
-                status=GATE_SKIPPED,
-                mechanism=MECH_ABSOLUTE,
-                detail='[fast] pytest = "off" — the install probe narrowed the '
-                "fast scope; tests run in quality-full only (v5.1 §5)",
-            )
-        paths = affected_test_files(ctx.repo, ctx.diff)
-        if not paths:
-            return GateResult(
-                name="pytest",
-                status=GATE_SKIPPED,
-                mechanism=MECH_ABSOLUTE,
-                detail="no affected tests",
-            )
+        paths, skip = _fast_selection(ctx)
+        if skip is not None:
+            return skip
         extra["selected"] = paths
 
     proc, elapsed, coverage_json = run_suite(ctx, paths)
     extra.update(_budget_extra(ctx, elapsed))
     if ctx.lock.pin("pytest") is None:
-        extra["pytest_pin"] = (
-            "unpinned — pytest is not in .quality/toolchain.lock (v5.1 §4.4)"
-        )
+        extra["pytest_pin"] = "unpinned — pytest is not in .quality/toolchain.lock (v5.1 §4.4)"
     if coverage_json is not None:
         covered = _coverage_percent(coverage_json)
         if covered is not None:

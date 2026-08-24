@@ -8,16 +8,29 @@ from the pinned pytest 9.1.1 (see the adapter's module docstring).
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
+import os
+import subprocess
 from pathlib import Path
 
+import pytest
+
+from aufsicht import pipeline
+from aufsicht.adapters import pytest_adapter
 from aufsicht.adapters.pytest_adapter import (
     affected_test_files,
     changed_src_modules,
     discover_test_files,
     parse_summary,
+    run_suite,
 )
+from aufsicht.base import BaseRef
+from aufsicht.config import QualityConfig
 from aufsicht.model import DiffModel
+from aufsicht.report import Report
+from aufsicht.toolchain import load_toolchain, project_env, project_env_pins
 from tests.conftest import run_cli, run_git
 from tests.fixtures.scratch import commit, make_repo
 
@@ -49,19 +62,17 @@ def run_quality(mode: str, repo: Path) -> tuple[int, dict]:
     proc = run_cli(mode, cwd=repo)
     try:
         report = json.loads(proc.stdout)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
         raise AssertionError(
             f"quality-{mode} produced no JSON report.\n"
             f"stdout: {proc.stdout[:500]}\nstderr: {proc.stderr[:2000]}"
-        )
+        ) from exc
     return proc.returncode, report
 
 
 def pytest_gate(report: dict) -> dict:
     entry = report["gates"].get("pytest")
-    assert entry is not None, (
-        f"pytest gate missing from report: {list(report['gates'])}"
-    )
+    assert entry is not None, f"pytest gate missing from report: {list(report['gates'])}"
     return entry
 
 
@@ -70,9 +81,7 @@ class TestFullMode:
         # v5.1 §18: a failing test → pytest gate, absolute, exit 1,
         # one finding per failed test with path and test id.
         repo = make_repo(tmp_path / "fail")
-        commit(
-            repo, {"tests/test_app.py": FAILING_TEST}, "failing test", branch="feature"
-        )
+        commit(repo, {"tests/test_app.py": FAILING_TEST}, "failing test", branch="feature")
         code, report = run_quality("full", repo)
         assert code == 1, json.dumps(report, indent=2)
         assert report["status"] == "fail"
@@ -84,7 +93,8 @@ class TestFullMode:
         assert findings[0]["rule"] == "pytest/failure"
         assert findings[0]["path"] == "tests/test_app.py"
         assert findings[0]["symbol"] == "test_add_wrong"
-        assert "6" in findings[0]["detail"] and "5" in findings[0]["detail"]
+        assert "6" in findings[0]["detail"]
+        assert "5" in findings[0]["detail"]
 
     def test_clean_suite_passes(self, tmp_path):
         repo = make_repo(tmp_path / "clean")
@@ -210,9 +220,7 @@ class TestFastModeOff:
         repo = make_repo(tmp_path / "off")
         config = repo / ".quality" / "config.toml"
         config.write_text(
-            config.read_text(encoding="utf-8").replace(
-                'pytest = "affected"', 'pytest = "off"'
-            ),
+            config.read_text(encoding="utf-8").replace('pytest = "affected"', 'pytest = "off"'),
             encoding="utf-8",
         )
         run_git("add", "-A", cwd=repo)
@@ -229,7 +237,8 @@ class TestFastModeOff:
         assert code == 0, json.dumps(report, indent=2)
         entry = pytest_gate(report)
         assert entry["status"] == "skipped", entry
-        assert "off" in entry["detail"] and "probe" in entry["detail"], entry
+        assert "off" in entry["detail"], entry
+        assert "probe" in entry["detail"], entry
 
 
 class TestParseSummary:
@@ -278,9 +287,7 @@ class TestParseSummary:
     def test_ansi_escapes_are_stripped(self):
         # pytest 9 colorises the summary even when piped; --color=no is
         # the primary defence, the strip is the second.
-        findings = parse_summary(
-            "FAILED \x1b[1mtests/test_app.py::test_fail\x1b[0m - boom\n"
-        )
+        findings = parse_summary("FAILED \x1b[1mtests/test_app.py::test_fail\x1b[0m - boom\n")
         assert findings[0].path == "tests/test_app.py"
 
     def test_summary_header_and_noise_are_ignored(self):
@@ -334,3 +341,170 @@ class TestSelectionHeuristic:
         repo = make_repo(tmp_path / "select4")
         diff = DiffModel(changed_files=frozenset({"src/scratch/__init__.py"}))
         assert affected_test_files(repo, diff) == ["tests/test_app.py"]
+
+
+# --------------------------------------------------------------------------
+# [tests] runner_args passthrough and the optional [tools] pytest-xdist
+# project-env pin (CI-speed plan M3, PR R). Landed inert: nothing in this
+# repository sets either yet, and the default paths below must stay
+# byte-identical to the pre-feature invocation.
+# --------------------------------------------------------------------------
+
+
+def _stub_context(repo: Path, config: QualityConfig | None = None) -> pipeline.GateContext:
+    return pipeline.GateContext(
+        repo=repo,
+        config=config or QualityConfig.load(repo),
+        lock=load_toolchain(repo),
+        base=BaseRef(source="config", ref="main", sha="0" * 40),
+        diff=DiffModel(),
+        env=repo / ".nonexistent-analyzer-env",
+        cache=repo.parent / "cache",
+        report=Report(base=None, command="full"),
+        mode="full",
+    )
+
+
+def _python(env: Path) -> str:
+    return str(env / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
+
+
+def _canonical_args(repo: Path, ctx: pipeline.GateContext) -> list[str]:
+    """The adapter's full-mode invocation for this context, spelled out
+    — the identity the inert default must preserve exactly."""
+    tag = hashlib.sha256(str(repo).encode()).hexdigest()[:12]
+    coverage_json = ctx.cache / "coverage" / f"coverage-{tag}.json"
+    return [
+        "-m",
+        "pytest",
+        "-c",
+        ".quality/pytest.ini",
+        "--rootdir",
+        str(repo),
+        "--color=no",
+        "--tb=no",
+        "-rfE",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--continue-on-collection-errors",
+        "--cov=src",
+        "--cov-branch",
+        "--cov-report=",
+        f"--cov-report=json:{coverage_json}",
+    ]
+
+
+def _captured_suite_command(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, config: QualityConfig | None = None
+) -> list[str]:
+    """run_suite's constructed command with the env build and the
+    subprocess stubbed: the command shape is the unit under test, the
+    suite itself is not."""
+    stub_env = repo / "stub-project-env"
+    stub_env.mkdir(exist_ok=True)
+    monkeypatch.setattr(pytest_adapter, "project_env", lambda *a, **k: stub_env)
+    recorded: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **kwargs):
+        recorded["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="2 passed in 0.01s\n", stderr="")
+
+    monkeypatch.setattr(pytest_adapter.subprocess, "run", fake_run)
+    run_suite(_stub_context(repo, config))
+    return recorded["cmd"]
+
+
+class TestRunnerArgsPassthrough:
+    """[tests] runner_args must reach the pinned pytest — as pytest
+    arguments, after ``-m pytest``, ahead of the canonical flags."""
+
+    def test_default_command_is_exactly_todays(self, tmp_path, monkeypatch):
+        # No runner_args (and no xdist pin in the scratch lock): the
+        # constructed command is byte-identical to the pre-feature one —
+        # the inertness contract of CI-speed plan M3 PR R.
+        repo = make_repo(tmp_path / "default")
+        cmd = _captured_suite_command(repo, monkeypatch)
+        assert cmd == [
+            _python(repo / "stub-project-env"),
+            *_canonical_args(repo, _stub_context(repo)),
+        ]
+
+    def test_runner_args_follow_m_pytest_and_precede_canonical_flags(self, tmp_path, monkeypatch):
+        # runner_args are pytest arguments (xdist's "-n auto" is the
+        # motivating case): ahead of "-m pytest" they would land on the
+        # interpreter and abort with a usage error, not run the suite.
+        repo = make_repo(tmp_path / "args")
+        config = dataclasses.replace(
+            QualityConfig.load(repo),
+            tests_runner_args=("-n", "auto", "--dist", "loadgroup"),
+        )
+        cmd = _captured_suite_command(repo, monkeypatch, config)
+        assert cmd[0] == _python(repo / "stub-project-env")
+        assert cmd[1:3] == ["-m", "pytest"]
+        assert cmd[3:7] == ["-n", "auto", "--dist", "loadgroup"]
+        # Today's canonical flags follow, untouched.
+        assert cmd[7:] == _canonical_args(repo, _stub_context(repo, config))[2:]
+
+    def test_runner_args_parsed_from_config_toml(self, tmp_path):
+        # The [tests] table in .quality/config.toml is the source of the
+        # tuple; the passthrough above is only as good as this parse.
+        repo = make_repo(tmp_path / "parsed")
+        config = repo / ".quality" / "config.toml"
+        config.write_text(
+            config.read_text(encoding="utf-8").replace(
+                "[tests]\n", '[tests]\nrunner_args = ["-n", "auto"]\n', 1
+            ),
+            encoding="utf-8",
+        )
+        assert QualityConfig.load(repo).tests_runner_args == ("-n", "auto")
+
+
+class TestProjectEnvPins:
+    """The optional [tools] pytest-xdist pin → project env content."""
+
+    def test_absent_pin_is_todays_pins_exactly(self, tmp_path):
+        repo = make_repo(tmp_path / "nopin")
+        assert project_env_pins(load_toolchain(repo)) == (
+            "pytest==9.1.1",
+            "pytest-cov==7.0.0",
+        )
+
+    def test_present_pin_installs_xdist_alongside(self, tmp_path):
+        repo = make_repo(tmp_path / "pin")
+        lockfile = repo / ".quality" / "toolchain.lock"
+        # Appended after the last [tools] entry (pyscn), so the line
+        # stays inside the table.
+        lockfile.write_text(
+            lockfile.read_text(encoding="utf-8") + 'pytest-xdist = "3.8.0"\n',
+            encoding="utf-8",
+        )
+        assert project_env_pins(load_toolchain(repo)) == (
+            "pytest==9.1.1",
+            "pytest-cov==7.0.0",
+            "pytest-xdist==3.8.0",
+        )
+
+    def test_pinned_xdist_lands_in_the_built_project_env(self, tmp_path):
+        # Beyond the pin list: a real build must complete and contain
+        # the plugin. pytest-xdist ships no console script, so this also
+        # proves the env-completeness check does not demand
+        # bin/pytest-xdist (plugin-only tools are exempt).
+        repo = make_repo(tmp_path / "built")
+        lockfile = repo / ".quality" / "toolchain.lock"
+        lockfile.write_text(
+            lockfile.read_text(encoding="utf-8") + 'pytest-xdist = "3.8.0"\n',
+            encoding="utf-8",
+        )
+        env = project_env(repo, load_toolchain(repo))
+        proc = subprocess.run(
+            [
+                _python(env),
+                "-c",
+                "from importlib.metadata import version; print(version('pytest-xdist'))",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == "3.8.0"

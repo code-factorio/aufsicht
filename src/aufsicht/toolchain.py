@@ -69,8 +69,8 @@ def load_toolchain(repo: Path) -> Toolchain:
         raise ToolingError(
             f"{TOOLCHAIN_PATH} not found",
             remedy="Run `aufsicht init` to pin the analyzer toolchain "
-                   "(v5.1 §4.4: a ratchet MUST NOT compare diagnostics "
-                   "produced by different versions of the same analyzer).",
+            "(v5.1 §4.4: a ratchet MUST NOT compare diagnostics "
+            "produced by different versions of the same analyzer).",
         )
     import tomllib
 
@@ -84,7 +84,7 @@ def load_toolchain(repo: Path) -> Toolchain:
         raise ToolingError(
             f"{TOOLCHAIN_PATH}: schema_version must be {TOOLCHAIN_SCHEMA_VERSION}, got {version!r}",
             remedy="Regenerate the toolchain lock with `aufsicht init --force` "
-                   "or `aufsicht upgrade`.",
+            "or `aufsicht upgrade`.",
         )
 
     tools_table = data.get("tools", {})
@@ -99,7 +99,7 @@ def load_toolchain(repo: Path) -> Toolchain:
             raise ToolingError(
                 f"{TOOLCHAIN_PATH}: pin for {name!r} must be an exact version, got {pin!r}",
                 remedy="Exact versions, not ranges — a range is a drifting "
-                       "instrument that looks pinned (v5.1 §4.4).",
+                "instrument that looks pinned (v5.1 §4.4).",
             )
         tools[name] = pin
 
@@ -144,8 +144,7 @@ def _run(cmd: list[str], *, timeout: int = 900) -> None:
         raise ToolingError(
             f"environment setup failed: {' '.join(cmd)}\n"
             f"{proc.stderr.strip()[:2000] or proc.stdout.strip()[:2000]}",
-            remedy="Check network access and the pinned versions in "
-                   f"{TOOLCHAIN_PATH}.",
+            remedy=f"Check network access and the pinned versions in {TOOLCHAIN_PATH}.",
         )
 
 
@@ -160,8 +159,15 @@ def _create_env(target: Path, pins: list[str], *, python: str | None) -> None:
             cmd += ["--python", python]
         _run(cmd)
         _run(
-            ["uv", "pip", "install", "--quiet", "--python", str(_bin_dir(target) / "python")]
-            + pins
+            [
+                "uv",
+                "pip",
+                "install",
+                "--quiet",
+                "--python",
+                str(_bin_dir(target) / "python"),
+                *pins,
+            ]
         )
     else:
         base = shutil.which("python3") or shutil.which("python")
@@ -170,7 +176,17 @@ def _create_env(target: Path, pins: list[str], *, python: str | None) -> None:
         # python -m venv has no --python; the fallback relies on the
         # ambient interpreter (uv is the preferred path).
         _run([base, "-m", "venv", str(target)])
-        _run([str(_bin_dir(target) / "python"), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", *pins])
+        _run(
+            [
+                str(_bin_dir(target) / "python"),
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--disable-pip-version-check",
+                *pins,
+            ]
+        )
 
 
 def _env_complete(env: Path, tools: list[str]) -> bool:
@@ -203,6 +219,35 @@ def _env_complete(env: Path, tools: list[str]) -> bool:
     return True
 
 
+def _wait_for_builder(
+    env: Path,
+    tools: list[str],
+    lock: Path,
+    *,
+    lock_stale_seconds: float,
+    wait_timeout: float,
+) -> None:
+    """Poll a concurrent builder until the env is complete. A lock
+    older than *lock_stale_seconds* means its builder died; unlink it
+    so the next process can take over while this one keeps polling."""
+    import time as _time
+
+    deadline = _time.monotonic() + wait_timeout
+    while _time.monotonic() < deadline:
+        if _env_complete(env, tools):
+            return
+        try:
+            if _time.time() - lock.stat().st_mtime > lock_stale_seconds:
+                lock.unlink()  # builder died; take over
+        except OSError:
+            pass
+        _time.sleep(1.0)
+    raise ToolingError(
+        f"timed out waiting for a concurrent build of {env.name}",
+        remedy="Remove stale caches under the aufsicht cache dir and retry.",
+    )
+
+
 def _build_env_in_place(
     env: Path,
     tools: list[str],
@@ -214,8 +259,6 @@ def _build_env_in_place(
     """Build *env* in place (never rename a venv: entry-point shebangs
     embed absolute paths), guarded by a lock so concurrent processes
     don't interleave installs."""
-    import time as _time
-
     if _env_complete(env, tools):
         return env
     env.parent.mkdir(parents=True, exist_ok=True)
@@ -227,20 +270,14 @@ def _build_env_in_place(
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
     except FileExistsError:
-        deadline = _time.monotonic() + wait_timeout
-        while _time.monotonic() < deadline:
-            if _env_complete(env, tools):
-                return env
-            try:
-                if _time.time() - lock.stat().st_mtime > lock_stale_seconds:
-                    lock.unlink()  # builder died; take over
-            except OSError:
-                pass
-            _time.sleep(1.0)
-        raise ToolingError(
-            f"timed out waiting for a concurrent build of {env.name}",
-            remedy="Remove stale caches under the aufsicht cache dir and retry.",
+        _wait_for_builder(
+            env,
+            tools,
+            lock,
+            lock_stale_seconds=lock_stale_seconds,
+            wait_timeout=wait_timeout,
         )
+        return env
     try:
         if not _env_complete(env, tools):
             if env.exists():
@@ -269,12 +306,10 @@ def _build_env_in_place(
 # Pinned packages that ship no console script (pytest plugins are
 # imported, not executed): they cannot be verified via bin/<name>, so
 # they are excluded from the entry-point completeness check.
-PLUGIN_ONLY_TOOLS = frozenset({"pytest-cov"})
+PLUGIN_ONLY_TOOLS = frozenset({"pytest-cov", "pytest-xdist"})
 
 
-def _ensure_env(
-    root: Path, key: str, pins: list[str], *, python: str | None = None
-) -> Path:
+def _ensure_env(root: Path, key: str, pins: list[str], *, python: str | None = None) -> Path:
     """Return a ready env at *root/key*, building it once."""
     entry_points = [p.split("==")[0] for p in pins if p.split("==")[0] not in PLUGIN_ONLY_TOOLS]
     return _build_env_in_place(
@@ -294,7 +329,9 @@ def analyzer_env(lock: Toolchain, cache: Path | None = None) -> Path:
     root = cache / "envs"
     root.mkdir(parents=True, exist_ok=True)
     key = "analyzer-" + lock.raw_hash[:24]
-    return _ensure_env(root, key, [f"{n}=={v}" for n, v in sorted(lock.tools.items())], python="3.12")
+    return _ensure_env(
+        root, key, [f"{n}=={v}" for n, v in sorted(lock.tools.items())], python="3.12"
+    )
 
 
 def project_env_key(repo: Path) -> tuple[str, str]:
@@ -319,22 +356,27 @@ def project_env_key(repo: Path) -> tuple[str, str]:
         except tomllib.TOMLDecodeError:
             data = {}
         project = data.get("project", {}) if isinstance(data.get("project"), dict) else {}
-        h.update(json.dumps(
-            {
-                "deps": project.get("dependencies", []),
-                "optional_deps": project.get("optional-dependencies", {}),
-                "groups": project.get("dependency-groups", {}),
-                "requires_python": project.get("requires-python", ""),
-            },
-            sort_keys=True,
-        ).encode())
+        h.update(
+            json.dumps(
+                {
+                    "deps": project.get("dependencies", []),
+                    "optional_deps": project.get("optional-dependencies", {}),
+                    "groups": project.get("dependency-groups", {}),
+                    "requires_python": project.get("requires-python", ""),
+                },
+                sort_keys=True,
+            ).encode()
+        )
     return h.hexdigest()[:24], lockfile
 
 
 def project_env_pins(lock: Toolchain) -> tuple[str, ...]:
     """The pins installed into every project env: the test runner and
     its coverage plugin (v5.1 §19: pytest with branch coverage in the
-    gate). Order is part of the install command, not the identity."""
+    gate), plus the optional parallel-runner plugin when the lock pins
+    it (CI-speed plan M3: a guardrail PR adds the pin to switch the
+    gate suite to xdist; no pin means today's env, exactly). Order is
+    part of the install command, not the identity."""
     pins: list[str] = []
     if lock.pin("pytest"):
         pins.append(f"pytest=={lock.pin('pytest')}")
@@ -342,6 +384,8 @@ def project_env_pins(lock: Toolchain) -> tuple[str, ...]:
         pins.append("pytest")
     if lock.pin("pytest-cov"):
         pins.append(f"pytest-cov=={lock.pin('pytest-cov')}")
+    if lock.pin("pytest-xdist"):
+        pins.append(f"pytest-xdist=={lock.pin('pytest-xdist')}")
     return tuple(pins)
 
 
@@ -361,19 +405,25 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     pins = project_env_pins(lock)
     pin_key = hashlib.sha256("\n".join(pins).encode()).hexdigest()[:12]
-    entry_points = [
-        p.split("==")[0] for p in pins if p.split("==")[0] not in PLUGIN_ONLY_TOOLS
-    ]
+    entry_points = [p.split("==")[0] for p in pins if p.split("==")[0] not in PLUGIN_ONLY_TOOLS]
 
     def build(env: Path) -> None:
         if _have_uv():
             _run(["uv", "venv", "--quiet", str(env)])
             install = [
-                "uv", "pip", "install", "--quiet",
-                "--python", str(_bin_dir(env) / "python"),
-                "-r", "pyproject.toml", *pins,
+                "uv",
+                "pip",
+                "install",
+                "--quiet",
+                "--python",
+                str(_bin_dir(env) / "python"),
+                "-r",
+                "pyproject.toml",
+                *pins,
             ]
-            proc = subprocess.run(install, cwd=str(repo), capture_output=True, text=True, timeout=900)
+            proc = subprocess.run(
+                install, cwd=str(repo), capture_output=True, text=True, timeout=900
+            )
             if proc.returncode != 0:
                 # A project may have no dependencies at all; fall back to
                 # the pins only rather than failing the whole gate.
@@ -383,12 +433,19 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
             if base is None:
                 raise ToolingError("neither uv nor python3 is available to build environments")
             _run([base, "-m", "venv", str(env)])
-            _run([str(_bin_dir(env) / "python"), "-m", "pip", "install",
-                  "--quiet", "--disable-pip-version-check", *pins])
+            _run(
+                [
+                    str(_bin_dir(env) / "python"),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--quiet",
+                    "--disable-pip-version-check",
+                    *pins,
+                ]
+            )
 
-    return _build_env_in_place(
-        root / f"proj-{files_key}-{pin_key}", entry_points, build
-    )
+    return _build_env_in_place(root / f"proj-{files_key}-{pin_key}", entry_points, build)
 
 
 def project_lockfile_differs(base_repo: Path, head_repo: Path) -> bool:
