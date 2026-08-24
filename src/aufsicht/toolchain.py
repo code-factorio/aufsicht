@@ -189,20 +189,80 @@ def _create_env(target: Path, pins: list[str], *, python: str | None) -> None:
         )
 
 
-def _env_complete(env: Path, tools: list[str]) -> bool:
+def _normalize_dist_name(name: str) -> str:
+    """PEP 503 normalization: pins use the PyPI form (`pip-audit`),
+    dist-info directories the escaped one (`pip_audit`)."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+# `<escaped name>-<version>.dist-info` — escaped names contain no `-`,
+# so the first hyphen separates name from version.
+_DIST_INFO_NAME = re.compile(r"^(?P<name>[A-Za-z0-9_.]+)-(?P<version>.+)\.dist-info$")
+
+
+def _site_packages(env: Path) -> Path | None:
+    """The env's site-packages directory, or None when the layout is
+    not a venv's (version verification then finds nothing)."""
+    if os.name == "nt":
+        cand = env / "Lib" / "site-packages"
+        return cand if cand.is_dir() else None
+    lib = env / "lib"
+    if not lib.is_dir():
+        return None
+    for child in sorted(lib.iterdir()):
+        cand = child / "site-packages"
+        if child.name.startswith("python") and cand.is_dir():
+            return cand
+    return None
+
+
+def _installed_versions(env: Path) -> dict[str, str]:
+    """Installed distributions as {normalized name: version}, read from
+    dist-info directory names — a directory scan, no subprocess calls."""
+    site = _site_packages(env)
+    if site is None:
+        return {}
+    found: dict[str, str] = {}
+    for entry in site.iterdir():
+        match = _DIST_INFO_NAME.match(entry.name)
+        if match is None:
+            continue
+        name = _normalize_dist_name(match.group("name"))
+        version = match.group("version")
+        if found.setdefault(name, version) != version:
+            # Two distributions of one package: matches no exact pin.
+            found[name] = ""
+    return found
+
+
+def _version_mismatches(env: Path, pins: dict[str, str]) -> list[str]:
+    """Pinned tools whose installed version differs from the pin (or
+    whose distribution is absent), as `name: installed != pinned`."""
+    installed = _installed_versions(env)
+    return [
+        f"{name}: {installed.get(_normalize_dist_name(name))!r} != {want!r}"
+        for name, want in sorted(pins.items())
+        if installed.get(_normalize_dist_name(name)) != want
+    ]
+
+
+def _env_complete(env: Path, entry_points: list[str], pins: dict[str, str]) -> bool:
     """A trusted env has its marker AND every expected entry point
-    whose shebang interpreter exists.
+    whose shebang interpreter exists AND every pinned distribution
+    installed at exactly its pinned version.
 
     Marker-only trust is not enough under concurrent builds, and
     existence-only trust is not enough because entry-point shebangs
     embed absolute interpreter paths — an env relocated after install
-    has live-looking scripts that fail with ENOENT. Self-heal instead
-    of trusting.
+    has live-looking scripts that fail with ENOENT. Neither catches an
+    env restored from a cache with the marker intact but wrong tool
+    versions installed. Verify instead of trusting: a failed
+    verification is a rebuild, never a pass and never a silent skip.
     """
     if not (env / ".aufsicht-ok").is_file():
         return False
     bin_dir = _bin_dir(env)
-    for tool in tools:
+    for tool in entry_points:
         exe = bin_dir / tool
         if not exe.exists():
             return False
@@ -216,29 +276,44 @@ def _env_complete(env: Path, tools: list[str]) -> bool:
             for part in shebang.split():
                 if "/" in part and not Path(part).exists():
                     return False
-    return True
+    return not _version_mismatches(env, pins)
 
 
-def _wait_for_builder(
+def _incompleteness_detail(env: Path, entry_points: list[str], pins: dict[str, str]) -> str:
+    """Why a freshly built env still fails verification."""
+    missing = [t for t in entry_points if not (_bin_dir(env) / t).exists()]
+    if missing:
+        return f"missing entry points for {missing}"
+    wrong = _version_mismatches(env, pins)
+    if wrong:
+        return f"installed versions disagree with the pins: {wrong}"
+    return "entry-point shebangs are broken (interpreter path does not exist)"
+
+
+def _wait_for_concurrent_build(
     env: Path,
-    tools: list[str],
+    entry_points: list[str],
+    pins: dict[str, str],
     lock: Path,
     *,
     lock_stale_seconds: float,
     wait_timeout: float,
 ) -> None:
-    """Poll a concurrent builder until the env is complete. A lock
-    older than *lock_stale_seconds* means its builder died; unlink it
-    so the next process can take over while this one keeps polling."""
+    """Block until the process holding *lock* finishes building *env*.
+
+    Returns only once the env verifies complete; a lock whose mtime is
+    older than *lock_stale_seconds* belongs to a dead builder and is
+    unlinked so the next acquirer can take over.
+    """
     import time as _time
 
     deadline = _time.monotonic() + wait_timeout
     while _time.monotonic() < deadline:
-        if _env_complete(env, tools):
+        if _env_complete(env, entry_points, pins):
             return
         try:
             if _time.time() - lock.stat().st_mtime > lock_stale_seconds:
-                lock.unlink()  # builder died; take over
+                lock.unlink()  # builder died; keep waiting for the taker-over
         except OSError:
             pass
         _time.sleep(1.0)
@@ -250,7 +325,8 @@ def _wait_for_builder(
 
 def _build_env_in_place(
     env: Path,
-    tools: list[str],
+    entry_points: list[str],
+    pins: dict[str, str],
     build,
     *,
     lock_stale_seconds: float = 1800.0,
@@ -259,40 +335,36 @@ def _build_env_in_place(
     """Build *env* in place (never rename a venv: entry-point shebangs
     embed absolute paths), guarded by a lock so concurrent processes
     don't interleave installs."""
-    if _env_complete(env, tools):
+    if _env_complete(env, entry_points, pins):
         return env
     env.parent.mkdir(parents=True, exist_ok=True)
     lock = env.with_name(env.name + ".lock")
-    if _env_complete(env, tools):
+    if _env_complete(env, entry_points, pins):
         return env
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
     except FileExistsError:
-        _wait_for_builder(
+        _wait_for_concurrent_build(
             env,
-            tools,
+            entry_points,
+            pins,
             lock,
             lock_stale_seconds=lock_stale_seconds,
             wait_timeout=wait_timeout,
         )
-        return env
+        return env  # the concurrent build verified complete
     try:
-        if not _env_complete(env, tools):
+        if not _env_complete(env, entry_points, pins):
             if env.exists():
                 shutil.rmtree(env)
             build(env)
             (env / ".aufsicht-ok").write_text("built-by-aufsicht\n", encoding="utf-8")
-            if not _env_complete(env, tools):
-                missing = [t for t in tools if not (_bin_dir(env) / t).exists()]
-                detail = (
-                    f"missing entry points for {missing}"
-                    if missing
-                    else "entry-point shebangs are broken (interpreter path does not exist)"
-                )
+            if not _env_complete(env, entry_points, pins):
                 raise ToolingError(
-                    f"environment {env.name} incomplete after build ({detail})",
+                    f"environment {env.name} incomplete after build "
+                    f"({_incompleteness_detail(env, entry_points, pins)})",
                     remedy="Check the pinned versions and network access.",
                 )
     finally:
@@ -305,15 +377,30 @@ def _build_env_in_place(
 
 # Pinned packages that ship no console script (pytest plugins are
 # imported, not executed): they cannot be verified via bin/<name>, so
-# they are excluded from the entry-point completeness check.
+# they are excluded from the entry-point completeness check — their
+# dist-info version is still verified like every other pin.
 PLUGIN_ONLY_TOOLS = frozenset({"pytest-cov", "pytest-xdist"})
+
+
+def _pin_versions(pins: list[str]) -> dict[str, str]:
+    """name → pinned version for pins that carry one (an unpinned
+    fallback such as `pytest` has no expected version to compare)."""
+    versions: dict[str, str] = {}
+    for pin in pins:
+        name, sep, version = pin.partition("==")
+        if sep:
+            versions[name] = version
+    return versions
 
 
 def _ensure_env(root: Path, key: str, pins: list[str], *, python: str | None = None) -> Path:
     """Return a ready env at *root/key*, building it once."""
     entry_points = [p.split("==")[0] for p in pins if p.split("==")[0] not in PLUGIN_ONLY_TOOLS]
     return _build_env_in_place(
-        root / key, entry_points, lambda env: _create_env(env, pins, python=python)
+        root / key,
+        entry_points,
+        _pin_versions(pins),
+        lambda env: _create_env(env, pins, python=python),
     )
 
 
@@ -445,7 +532,9 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
                 ]
             )
 
-    return _build_env_in_place(root / f"proj-{files_key}-{pin_key}", entry_points, build)
+    return _build_env_in_place(
+        root / f"proj-{files_key}-{pin_key}", entry_points, _pin_versions(list(pins)), build
+    )
 
 
 def project_lockfile_differs(base_repo: Path, head_repo: Path) -> bool:
