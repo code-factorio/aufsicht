@@ -21,6 +21,13 @@ on:
 permissions:
   contents: read
 
+# Superseded PR runs are cancelled; a push to main is never cancelled
+# (decided on the CI-speed map: mid-publish cancellation would kill the
+# PyPI upload). New pushes to the same branch still queue normally.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # One cache root for the gate, the suite, and every scratch repo the
   # self-tests spawn (conftest.py routes AUFSICHT_TEST_CACHE into the
@@ -32,6 +39,7 @@ env:
 jobs:
   quality-full:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -94,6 +102,7 @@ jobs:
   # results, ~3.4x faster wall-clock on 4 cores).
   self-test:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -126,7 +135,7 @@ jobs:
           python -m pip install . uv pytest pytest-xdist
 
       - name: Runner self-test suite
-        run: python -m pytest tests -q -n auto
+        run: python -m pytest tests -q -n 4
 
   # Publishing (distribution spec §14's open decision, resolved: the
   # index is the channel). Runs only from main and only after a green
