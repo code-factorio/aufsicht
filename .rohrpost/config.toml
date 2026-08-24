@@ -1,0 +1,10 @@
+# Rohrpost project configuration. Committed; safe to hand-edit.
+# The prefix is DISPLAY-ONLY: it never enters the event log, so
+# renaming it here re-renders every ticket id with no migration.
+
+[project]
+prefix = "AUFSI"
+
+# [remotes.github]   # phase 1: see spec §8
+# url = "https://api.github.com"
+# repo = "owner/name"
