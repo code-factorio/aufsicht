@@ -38,6 +38,9 @@ TOOLCHAIN_PATH = ".quality/toolchain.lock"
 # subject is it.
 ENVIRONMENT_SENSITIVE_TOOLS = frozenset({"pyright", "deptry"})
 
+# Poll interval for a waiter on a concurrent env build (seconds).
+_ENV_BUILD_POLL_SECONDS = 1.0
+
 # Files that define a project's dependency resolution, in priority
 # order. The first match is the cache key; the pyproject is included in
 # the hash either way so a dependency edit without a lock still
@@ -298,25 +301,31 @@ def _wait_for_concurrent_build(
     *,
     lock_stale_seconds: float,
     wait_timeout: float,
-) -> None:
+) -> bool:
     """Block until the process holding *lock* finishes building *env*.
 
-    Returns only once the env verifies complete; a lock whose mtime is
-    older than *lock_stale_seconds* belongs to a dead builder and is
-    unlinked so the next acquirer can take over.
+    Returns True once the env verifies complete. A lock whose mtime is
+    older than *lock_stale_seconds* belongs to a dead builder: unlink
+    it and return False so the CALLER re-acquires and builds — a lone
+    waiter must not keep polling an env nobody is building (observed:
+    a stale lock from a killed process cost a full wait_timeout of
+    polling before failing). Raises on timeout.
     """
     import time as _time
 
     deadline = _time.monotonic() + wait_timeout
     while _time.monotonic() < deadline:
         if _env_complete(env, entry_points, pins):
-            return
+            return True
         try:
             if _time.time() - lock.stat().st_mtime > lock_stale_seconds:
-                lock.unlink()  # builder died; keep waiting for the taker-over
+                lock.unlink()  # builder died; hand the lock back
+                return False
         except OSError:
-            pass
-        _time.sleep(1.0)
+            # The lock vanished: the builder finished or died; with the
+            # env still incomplete the caller must retry acquisition.
+            return False
+        _time.sleep(_ENV_BUILD_POLL_SECONDS)
     raise ToolingError(
         f"timed out waiting for a concurrent build of {env.name}",
         remedy="Remove stale caches under the aufsicht cache dir and retry.",
@@ -339,22 +348,25 @@ def _build_env_in_place(
         return env
     env.parent.mkdir(parents=True, exist_ok=True)
     lock = env.with_name(env.name + ".lock")
-    if _env_complete(env, entry_points, pins):
-        return env
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-    except FileExistsError:
-        _wait_for_concurrent_build(
-            env,
-            entry_points,
-            pins,
-            lock,
-            lock_stale_seconds=lock_stale_seconds,
-            wait_timeout=wait_timeout,
-        )
-        return env  # the concurrent build verified complete
+    while True:
+        if _env_complete(env, entry_points, pins):
+            return env
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+        except FileExistsError:
+            if _wait_for_concurrent_build(
+                env,
+                entry_points,
+                pins,
+                lock,
+                lock_stale_seconds=lock_stale_seconds,
+                wait_timeout=wait_timeout,
+            ):
+                return env  # the concurrent build verified complete
+            continue  # stale/dead lock taken over: acquire and build
+        break
     try:
         if not _env_complete(env, entry_points, pins):
             if env.exists():
