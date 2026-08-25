@@ -29,6 +29,10 @@ semgrep = "changed-files"
 # The declared project test budget (v5.1 §5): repo-specific, measured at
 # install by the pytest-suite probe and written down here.
 budget_seconds = 0
+# The gate suite runs under the pinned xdist with a fixed worker
+# count (map decision: the 4-vCPU ceiling; auto oversubscribes
+# smaller runners). Identical outcomes, ~2.6x faster (M3).
+runner_args = ["-n", "4"]
 
 [complexity]
 c901_max = 10               # per-function, changed-file scope (v5.1 §4.2)

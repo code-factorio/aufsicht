@@ -143,7 +143,9 @@ class TestExemptions:
         # distribution spec §10: a runner upgrade is a toolchain bump —
         # exempt the affected analyzers for that PR and say so.
         repo = self._repo(tmp_path, "runner-bump")
-        bumped = SCRATCH_TOOLCHAIN.replace('runner_version = "0.2.0"', 'runner_version = "0.3.0"')
+        import re
+
+        bumped = re.sub(r'runner_version = "[^"]+"', 'runner_version = "9.9.9"', SCRATCH_TOOLCHAIN)
         commit(repo, {".quality/toolchain.lock": bumped}, "upgrade runner", branch="feature")
         _code, report = run_full(repo)
         assert "ruff" in report["exempt_tools"]
