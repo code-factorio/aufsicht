@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from tests.conftest import run_cli
-from tests.fixtures.scratch import SCRATCH_TOOLCHAIN, commit, install_quality, make_repo
+from tests.fixtures.scratch import SCRATCH_TOOLCHAIN, commit, make_repo
 from tests.test_selftests import run_full
 
 
@@ -21,30 +19,26 @@ class TestPerRuleRatchet:
     def test_fix_one_f401_add_one_b006(self, tmp_path):
         # §18: fix one F401, add one B006 → Ruff, per-rule ratchet
         # (a total ratchet passes this)
-        base_app = (
-            "import os\n"
-            "\n"
-            "\n"
-            "def add(a: int, b: int) -> int:\n"
-            "    return a + b\n"
+        base_app = "import os\n\n\ndef add(a: int, b: int) -> int:\n    return a + b\n"
+        repo = make_repo(
+            tmp_path / "swap",
+            app=base_app,
+            test=("from scratch.app import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n"),
         )
-        repo = make_repo(tmp_path / "swap", app=base_app, test=(
-            "from scratch.app import add\n"
-            "\n"
-            "\n"
-            "def test_add():\n"
-            "    assert add(2, 3) == 5\n"
-        ))
-        commit(repo, {
-            # F401 fixed (import os removed), B006 introduced.
-            # Same file → both diff-scoped and ratchet see it; the
-            # assertion is that the ratchet reports the per-rule
-            # regression while totals net to zero.
-            "src/scratch/app.py": (
-                "def add(a: int, b: int, acc: list = []) -> int:\n"
-                "    return a + b + len(acc)\n"
-            ),
-        }, "fix F401, introduce B006", branch="feature")
+        commit(
+            repo,
+            {
+                # F401 fixed (import os removed), B006 introduced.
+                # Same file → both diff-scoped and ratchet see it; the
+                # assertion is that the ratchet reports the per-rule
+                # regression while totals net to zero.
+                "src/scratch/app.py": (
+                    "def add(a: int, b: int, acc: list = []) -> int:\n    return a + b + len(acc)\n"
+                ),
+            },
+            "fix F401, introduce B006",
+            branch="feature",
+        )
         code, report = run_full(repo)
         assert code == 1
         gate = report["gates"]["ruff"]
@@ -62,39 +56,38 @@ class TestPerRuleRatchet:
         # v5.1 §4.3 residual gameability, accepted for Tier 1: two
         # instances of the same rule in different files swap cleanly.
         # This documents the accepted limit, not a bug.
-        base_app = (
-            "import os\n"
-            "\n"
-            "\n"
-            "def add(a: int, b: int) -> int:\n"
-            "    return a + b\n"
-        )
+        base_app = "import os\n\n\ndef add(a: int, b: int) -> int:\n    return a + b\n"
         repo = make_repo(tmp_path / "swap2", app=base_app)
-        commit(repo, {
-            "src/scratch/app.py": (
-                "import os\n"
-                "import json\n"
-                "\n"
-                "\n"
-                "def add(a: int, b: int) -> int:\n"
-                "    return a + b\n"
-            ),
-        }, "swap F401s", branch="feature")
-        code, report = run_full(repo)
+        commit(
+            repo,
+            {
+                "src/scratch/app.py": (
+                    "import os\n"
+                    "import json\n"
+                    "\n"
+                    "\n"
+                    "def add(a: int, b: int) -> int:\n"
+                    "    return a + b\n"
+                ),
+            },
+            "swap F401s",
+            branch="feature",
+        )
+        _code, report = run_full(repo)
         # F401: base 1 → head 2 would regress... but diff-scoped flags
         # the new F401 in the changed file anyway. The ratchet's totals
         # rose by one, so this fails via both — the interesting case is
         # fix-one-add-one of the same rule, which nets to zero:
-        commit(repo, {
-            "src/scratch/app.py": (
-                "import json\n"
-                "\n"
-                "\n"
-                "def add(a: int, b: int) -> int:\n"
-                "    return a + b\n"
-            ),
-        }, "swap same rule: fix os, add json")
-        code, report = run_full(repo)
+        commit(
+            repo,
+            {
+                "src/scratch/app.py": (
+                    "import json\n\n\ndef add(a: int, b: int) -> int:\n    return a + b\n"
+                ),
+            },
+            "swap same rule: fix os, add json",
+        )
+        _code, report = run_full(repo)
         gate = report["gates"]["ruff"]
         assert gate["ratchet"]["regressed_rules"] == []
         assert gate["ratchet"]["totals"]["base"] == gate["ratchet"]["totals"]["head"]
@@ -115,7 +108,7 @@ class TestExemptions:
             '    "C901", # per-function complexity (changed-file scope, v5.1 §4.2)\n    "C4",',
         )
         commit(repo, {".quality/ruff.toml": ruff_toml}, "enable C4 rules", branch="feature")
-        code, report = run_full(repo)
+        _code, report = run_full(repo)
         assert report["exempt_tools"] == ["ruff"], report["exempt_tools"]
         assert "ruff" in report["exemption_reasons"]
         assert report["gates"]["ruff"]["ratchet"] == "exempt"
@@ -128,7 +121,7 @@ class TestExemptions:
         repo = self._repo(tmp_path, "toolchain-bump")
         bumped = SCRATCH_TOOLCHAIN.replace('ruff = "0.16.3"', 'ruff = "0.16.2"')
         commit(repo, {".quality/toolchain.lock": bumped}, "bump ruff pin", branch="feature")
-        code, report = run_full(repo)
+        _code, report = run_full(repo)
         assert report["exempt_tools"] == ["ruff"], report["exempt_tools"]
         assert "toolchain.lock pin for ruff changed" in report["exemption_reasons"]["ruff"]
 
@@ -139,7 +132,7 @@ class TestExemptions:
         pyproject = (repo / "pyproject.toml").read_text(encoding="utf-8")
         pyproject += '\n[project.optional-dependencies]\nextra = ["click"]\n'
         commit(repo, {"pyproject.toml": pyproject}, "add optional dep", branch="feature")
-        code, report = run_full(repo)
+        _code, report = run_full(repo)
         assert report["dependency_environment_changed"] is True
         assert sorted(report["exempt_tools"]) == ["deptry", "pyright"], report["exempt_tools"]
         assert "ruff" not in report["exempt_tools"]
@@ -150,7 +143,7 @@ class TestExemptions:
         repo = self._repo(tmp_path, "runner-bump")
         bumped = SCRATCH_TOOLCHAIN.replace('runner_version = "0.1.0"', 'runner_version = "0.2.0"')
         commit(repo, {".quality/toolchain.lock": bumped}, "upgrade runner", branch="feature")
-        code, report = run_full(repo)
+        _code, report = run_full(repo)
         assert "ruff" in report["exempt_tools"]
         assert "runner version changed" in report["exemption_reasons"]["ruff"]
 
@@ -175,6 +168,7 @@ class TestExemptions:
 
 def repo_sha(repo) -> str:
     from tests.conftest import run_git
+
     return run_git("rev-parse", "main", cwd=repo).stdout.strip()
 
 
@@ -182,6 +176,7 @@ class TestFailClosed:
     def test_shallow_clone_in_ci_exits_3(self, tmp_path):
         repo = make_repo(tmp_path / "shallow")
         from tests.conftest import run_git
+
         (repo / ".git/shallow").write_text(
             run_git("rev-parse", "HEAD", cwd=repo).stdout.strip(), encoding="utf-8"
         )
@@ -200,3 +195,45 @@ class TestFailClosed:
         report = json.loads(proc.stdout)
         assert report["status"] == "tooling-error"
         assert report["tooling_error"]["message"]
+
+
+class TestBaseWorktreeLocking:
+    def test_concurrent_same_sha_creation_is_safe(self, tmp_path):
+        # AUFSI-mk90zn: xdist workers whose scratch repos share a
+        # deterministic initial commit race on one base SHA. The
+        # SHA-keyed lock must let every caller through; the unguarded
+        # check-then-create lost the race with "already exists" (exit 3).
+        from concurrent.futures import ThreadPoolExecutor
+
+        from aufsicht import ratchet as ratchet_mod
+
+        repo = make_repo(tmp_path / "repo")
+        sha = repo_sha(repo)
+        cache = tmp_path / "cache"
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            paths = list(
+                pool.map(
+                    lambda _: ratchet_mod.base_worktree(repo, sha, cache),
+                    range(8),
+                )
+            )
+        assert len({str(path) for path in paths}) == 1
+        assert (paths[0] / ".git").exists()
+        assert not (cache / "worktrees" / f"{sha}.lock").exists()
+
+    def test_stale_lock_is_taken_over(self, tmp_path):
+        # A lock left behind by a dead holder must not block creation
+        # forever: past the staleness threshold the next caller wins it.
+        import os as os_mod
+
+        from aufsicht import ratchet as ratchet_mod
+
+        repo = make_repo(tmp_path / "repo")
+        sha = repo_sha(repo)
+        cache = tmp_path / "cache" / "worktrees"
+        cache.mkdir(parents=True)
+        lock = cache / f"{sha}.lock"
+        lock.write_text("999999", encoding="utf-8")
+        os_mod.utime(lock, (0, 0))  # far past any staleness threshold
+        wt = ratchet_mod.base_worktree(repo, sha, cache.parent)
+        assert (wt / ".git").exists()
