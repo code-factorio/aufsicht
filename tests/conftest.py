@@ -38,12 +38,14 @@ GIT_ENV = {
 # Base-resolution reads these before [base] ref (v5.1 §4.6), so a real
 # CI sets GITHUB_BASE_REF on every pull_request run. Tests must not see
 # the host's values — neither in-process nor in scratch CLI runs.
+# QUALITY_BASE_REF is a config-file key, never an environment variable
+# (base.py reads it only from .quality/config.toml), so it needs no
+# blanking here.
 CI_BASE_VARS = (
     "GITHUB_BASE_SHA",
     "GITHUB_BASE_REF",
     "CI_MERGE_REQUEST_DIFF_BASE_SHA",
     "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
-    "QUALITY_BASE_REF",
 )
 
 
@@ -61,7 +63,7 @@ def no_ci_base_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def prewarm_scratch_envs(test_cache: Path) -> None:
+def prewarm_scratch_envs() -> None:
     """Build the scratch analyzer env before the first test runs.
 
     The SCRATCH_TOOLCHAIN bytes every scratch repo writes hash to the
@@ -123,9 +125,3 @@ def run_cli(*args: str, cwd: Path, timeout: int = 1200) -> subprocess.CompletedP
         env=env,
         timeout=timeout,
     )
-
-
-@pytest.fixture(scope="session")
-def test_cache() -> Path:
-    TEST_CACHE.mkdir(parents=True, exist_ok=True)
-    return TEST_CACHE

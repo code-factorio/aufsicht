@@ -344,8 +344,6 @@ def _build_env_in_place(
     """Build *env* in place (never rename a venv: entry-point shebangs
     embed absolute paths), guarded by a lock so concurrent processes
     don't interleave installs."""
-    if _env_complete(env, entry_points, pins):
-        return env
     env.parent.mkdir(parents=True, exist_ok=True)
     lock = env.with_name(env.name + ".lock")
     while True:
@@ -405,9 +403,15 @@ def _pin_versions(pins: list[str]) -> dict[str, str]:
     return versions
 
 
+def _entry_points(pins: list[str] | tuple[str, ...]) -> list[str]:
+    """Console-script names for *pins* — plugin-only tools ship none
+    and are exempt from the entry-point completeness check."""
+    return [p.split("==")[0] for p in pins if p.split("==")[0] not in PLUGIN_ONLY_TOOLS]
+
+
 def _ensure_env(root: Path, key: str, pins: list[str], *, python: str | None = None) -> Path:
     """Return a ready env at *root/key*, building it once."""
-    entry_points = [p.split("==")[0] for p in pins if p.split("==")[0] not in PLUGIN_ONLY_TOOLS]
+    entry_points = _entry_points(pins)
     return _build_env_in_place(
         root / key,
         entry_points,
@@ -426,7 +430,6 @@ def analyzer_env(lock: Toolchain, cache: Path | None = None) -> Path:
     """
     cache = cache or cache_dir()
     root = cache / "envs"
-    root.mkdir(parents=True, exist_ok=True)
     key = "analyzer-" + lock.raw_hash[:24]
     return _ensure_env(
         root, key, [f"{n}=={v}" for n, v in sorted(lock.tools.items())], python="3.12"
@@ -501,10 +504,9 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
     cache = cache or cache_dir()
     files_key, _lockfile = project_env_key(repo)
     root = cache / "projenvs"
-    root.mkdir(parents=True, exist_ok=True)
     pins = project_env_pins(lock)
     pin_key = hashlib.sha256("\n".join(pins).encode()).hexdigest()[:12]
-    entry_points = [p.split("==")[0] for p in pins if p.split("==")[0] not in PLUGIN_ONLY_TOOLS]
+    entry_points = _entry_points(pins)
 
     def build(env: Path) -> None:
         if _have_uv():
