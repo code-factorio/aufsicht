@@ -14,7 +14,7 @@ set -euo pipefail
 # .quality/toolchain.lock in the target repo, and the JSON report. If
 # this copy ever drifts, it shows up as a diff rather than as two
 # repositories mysteriously behaving differently.
-AUFSICHT_VERSION="0.2.2"
+AUFSICHT_VERSION="0.2.3"
 
 say() { printf 'bootstrap: %s\n' "$*" >&2; }
 die() { printf 'bootstrap: ERROR: %s\n' "$*" >&2; exit 1; }
