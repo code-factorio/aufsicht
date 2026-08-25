@@ -60,6 +60,38 @@ def no_ci_base_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def prewarm_scratch_envs(test_cache: Path) -> None:
+    """Build the scratch analyzer env before the first test runs.
+
+    The SCRATCH_TOOLCHAIN bytes every scratch repo writes hash to the
+    same content-keyed env, so building it here (plus the default
+    scratch project env) turns the first CLI run's multi-minute cold
+    install into a cache hit instead of a first-test timeout risk.
+    Under pytest-xdist each worker runs this fixture; the O_EXCL build
+    lock in aufsicht.toolchain serializes the build while the other
+    workers poll. A network failure surfaces as a session-scoped error
+    — accepted (CI-SPEED-PLAN §4, Milestone 2.1).
+    """
+    import tempfile
+
+    from aufsicht import toolchain
+    from tests.fixtures.scratch import SCRATCH_PYPROJECT, SCRATCH_TOOLCHAIN
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / ".quality").mkdir()
+        # Byte-exact like install_quality: the env key is the lock's
+        # bytes (a text-mode write would translate line endings on
+        # Windows and build a second env); the pyproject mirrors
+        # write_files' text write so the project-env key matches.
+        (root / ".quality" / "toolchain.lock").write_bytes(SCRATCH_TOOLCHAIN.encode("utf-8"))
+        (root / "pyproject.toml").write_text(SCRATCH_PYPROJECT, encoding="utf-8")
+        lock = toolchain.load_toolchain(root)
+        toolchain.analyzer_env(lock, TEST_CACHE)
+        toolchain.project_env(root, lock, TEST_CACHE)
+
+
 def run_git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
     env = {**os.environ, **GIT_ENV}
     proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env)
