@@ -115,21 +115,32 @@ def base_worktree(repo: Path, sha: str, cache: Path | None = None) -> Path:
     run, or xdist workers whose scratch repos share a deterministic
     initial commit — wait for the winner instead of racing
     `git worktree add` into "already exists" (exit 3, fail closed).
+
+    The lock is the completion signal: `git worktree add` creates the
+    `.git` link before it checks files out, so a tree counts as
+    complete only once the lock is gone — never on `.git` alone. A
+    held lock is taken over only when it is past the staleness age AND
+    its recorded PID is dead, and the creator releases the lock only
+    while its content still names it, so a superseded creator cannot
+    unlink a successor's lock.
     """
     cache = cache or cache_dir()
     wt = cache / "worktrees" / sha
-    if (wt / ".git").exists():
-        return wt
-    wt.parent.mkdir(parents=True, exist_ok=True)
     lock = wt.parent / f"{sha}.lock"
+    marker = str(os.getpid())
+    wt.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + _WORKTREE_WAIT_SECONDS
     while True:
+        # Complete only when the tree is present AND nobody is
+        # mid-create for it (the .git link exists before the checkout
+        # finishes, so .git alone proves nothing).
+        if (wt / ".git").exists() and not lock.exists():
+            return wt
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
-            _take_over_stale_lock(lock)
-            if (wt / ".git").exists():
-                return wt
+            if _take_over_abandoned_lock(lock):
+                continue
             if time.monotonic() > deadline:
                 raise ToolingError(
                     f"timed out waiting for the base worktree at {sha}: {lock} still held",
@@ -141,11 +152,11 @@ def base_worktree(repo: Path, sha: str, cache: Path | None = None) -> Path:
             continue
         try:
             with os.fdopen(fd, "w") as handle:
-                handle.write(str(os.getpid()))
+                handle.write(marker)
             if not (wt / ".git").exists():
                 _add_worktree(repo, wt, sha)
         finally:
-            lock.unlink(missing_ok=True)
+            _release_lock(lock, marker)
         return wt
 
 
@@ -163,15 +174,53 @@ def _add_worktree(repo: Path, wt: Path, sha: str) -> None:
             )
 
 
-def _take_over_stale_lock(lock: Path) -> None:
+def _take_over_abandoned_lock(lock: Path) -> bool:
+    """Remove *lock* only when its holder is provably gone.
+
+    Age alone is not proof: a paused or slow creator (a `git worktree
+    add` over a cold cache) still owns a lock older than the
+    staleness threshold. Take over only past the age AND with a dead
+    recorded PID. Anything unreadable counts as held: fail closed.
+    """
     try:
         age = time.time() - lock.stat().st_mtime
-    except FileNotFoundError:
-        return
-    if age > _WORKTREE_STALE_SECONDS:
-        # The holder died mid-create; take the lock over. The next
-        # O_EXCL attempt by this (or any) caller wins it.
-        lock.unlink(missing_ok=True)
+        pid = int(lock.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return False
+    if age <= _WORKTREE_STALE_SECONDS or _pid_alive(pid):
+        return False
+    lock.unlink(missing_ok=True)
+    return True
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether *pid* names a live process on this machine.
+
+    The lock lives in a machine-local cache, so a PID check is valid.
+    When the answer cannot be determined, assume alive (fail closed).
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by another user
+    except (OSError, ValueError, OverflowError):
+        return True  # cannot tell: assume alive
+    return True
+
+
+def _release_lock(lock: Path, marker: str) -> None:
+    """Release *lock* only while its content still names *marker*.
+
+    A creator whose abandoned lock was taken over must not unlink its
+    successor's lock on the way out of its finally block.
+    """
+    try:
+        if lock.read_text(encoding="utf-8") == marker:
+            lock.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # --- base-run cache -------------------------------------------------------

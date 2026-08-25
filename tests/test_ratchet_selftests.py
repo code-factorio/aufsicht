@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tests.conftest import run_cli
 from tests.fixtures.scratch import SCRATCH_TOOLCHAIN, commit, make_repo
 from tests.test_selftests import run_full
@@ -223,7 +225,8 @@ class TestBaseWorktreeLocking:
 
     def test_stale_lock_is_taken_over(self, tmp_path):
         # A lock left behind by a dead holder must not block creation
-        # forever: past the staleness threshold the next caller wins it.
+        # forever: past the staleness age AND with a dead recorded PID
+        # the next caller takes it over.
         import os as os_mod
 
         from aufsicht import ratchet as ratchet_mod
@@ -233,7 +236,74 @@ class TestBaseWorktreeLocking:
         cache = tmp_path / "cache" / "worktrees"
         cache.mkdir(parents=True)
         lock = cache / f"{sha}.lock"
-        lock.write_text("999999", encoding="utf-8")
+        lock.write_text("999999", encoding="utf-8")  # no such process
         os_mod.utime(lock, (0, 0))  # far past any staleness threshold
         wt = ratchet_mod.base_worktree(repo, sha, cache.parent)
         assert (wt / ".git").exists()
+
+    def test_live_holder_is_not_stolen(self, tmp_path, monkeypatch):
+        # Age alone must not trigger takeover: a paused or slow creator
+        # still owns its lock. With a live recorded PID the caller waits
+        # and fails closed (exit 3) rather than stealing it.
+        import os as os_mod
+        import time as time_mod
+
+        from aufsicht import ratchet as ratchet_mod
+        from aufsicht.errors import ToolingError
+
+        repo = make_repo(tmp_path / "repo")
+        sha = repo_sha(repo)
+        cache = tmp_path / "cache" / "worktrees"
+        cache.mkdir(parents=True)
+        lock = cache / f"{sha}.lock"
+        lock.write_text(str(os_mod.getpid()), encoding="utf-8")  # alive
+        os_mod.utime(lock, (0, 0))  # ancient, but the holder lives
+        monkeypatch.setattr(ratchet_mod, "_WORKTREE_WAIT_SECONDS", 0.5)
+        monkeypatch.setattr(ratchet_mod, "_WORKTREE_POLL_SECONDS", 0.02)
+        started = time_mod.monotonic()
+        with pytest.raises(ToolingError, match="still held"):
+            ratchet_mod.base_worktree(repo, sha, cache.parent)
+        assert time_mod.monotonic() - started >= 0.4
+        assert lock.exists()  # not stolen
+
+    def test_waiter_waits_for_checkout_completion(self, tmp_path):
+        # PR review P1: `git worktree add` creates the .git link before
+        # the checkout finishes. A .git file with the lock still held
+        # means creation is in flight — the waiter must block until the
+        # lock is released, not return an incomplete tree.
+        import os as os_mod
+        import threading
+        import time as time_mod
+
+        from aufsicht import ratchet as ratchet_mod
+
+        repo = make_repo(tmp_path / "repo")
+        sha = repo_sha(repo)
+        cache = tmp_path / "cache"
+        wt = cache / "worktrees" / sha
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text("gitdir: fake-in-flight-link\n", encoding="utf-8")
+        lock = wt.parent / f"{sha}.lock"
+        lock.write_text(str(os_mod.getpid()), encoding="utf-8")  # alive: no takeover
+
+        def release():
+            time_mod.sleep(0.3)
+            lock.unlink()
+
+        threading.Thread(target=release).start()
+        started = time_mod.monotonic()
+        result = ratchet_mod.base_worktree(repo, sha, cache)
+        assert time_mod.monotonic() - started >= 0.25
+        assert result == wt
+
+    def test_release_lock_only_removes_own(self, tmp_path):
+        # A creator whose abandoned lock was taken over must not unlink
+        # its successor's lock on the way out.
+        from aufsicht import ratchet as ratchet_mod
+
+        lock = tmp_path / "x.lock"
+        lock.write_text("4242", encoding="utf-8")
+        ratchet_mod._release_lock(lock, "1111")  # not ours anymore
+        assert lock.exists()
+        ratchet_mod._release_lock(lock, "4242")  # still ours
+        assert not lock.exists()
