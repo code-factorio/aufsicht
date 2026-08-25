@@ -100,7 +100,9 @@ def install_quality(root: Path, *, base_ref: str = "main") -> None:
     config = (TEMPLATES / "quality" / "config.toml").read_text(encoding="utf-8")
     config = config.replace('ref = "main"', f'ref = "{base_ref}"')
     (quality / "config.toml").write_text(config, encoding="utf-8")
-    (quality / "toolchain.lock").write_text(SCRATCH_TOOLCHAIN, encoding="utf-8")
+    # Bytes, not text: a text-mode write translates \n to the platform
+    # line ending on Windows, and the env cache key is the lock's bytes.
+    (quality / "toolchain.lock").write_bytes(SCRATCH_TOOLCHAIN.encode("utf-8"))
 
 
 def make_repo(
