@@ -30,7 +30,7 @@ SCRATCH_TOOLCHAIN = """\
 # that can bump Ruff can shift every ratchet reference without
 # touching a threshold. Exact versions, never ranges.
 schema_version = 1
-runner_version = "0.2.1"
+runner_version = "0.2.2"
 spec_version = "v5.1"
 addendum_version = "final"
 
