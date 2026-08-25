@@ -26,8 +26,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install the pinned aufsicht runner (distribution spec §3)
-        run: pip install aufsicht=={{RUNNER_VERSION}}
+      # uv ships with the runner install (v5.1 §4.4: uv is the supported
+      # resolver — the pip-audit gate and the project-env build exit 3
+      # without it).
+      - name: Install the pinned aufsicht runner and uv (distribution spec §3)
+        run: pip install aufsicht=={{RUNNER_VERSION}} uv
 
       - name: quality-full
         shell: bash

@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from tests.conftest import run_cli, run_git
-from tests.fixtures.scratch import make_repo, write_files
+from tests.fixtures.scratch import make_repo
 
 
 def branch_of(repo) -> str:
@@ -39,7 +37,8 @@ class TestDryRun:
         plan = json.loads(proc.stdout)
         assert "day_one_allowlist" in plan
         assert "cycles" in plan["day_one_allowlist"]
-        assert "probes" in plan and plan["probes"]["decisions"]
+        assert "probes" in plan
+        assert plan["probes"]["decisions"]
 
 
 class TestRefusals:
@@ -82,7 +81,7 @@ class TestRefusals:
         repo = make_repo(tmp_path / "pyproject-collision", with_quality=False)
         # Put ruff config INTO pyproject (the §5.4 collision).
         pyproject = (repo / "pyproject.toml").read_text(encoding="utf-8")
-        pyproject += '\n[tool.ruff]\nline-length = 88\n'
+        pyproject += "\n[tool.ruff]\nline-length = 88\n"
         (repo / "pyproject.toml").write_text(pyproject, encoding="utf-8")
         run_git("add", "-A", cwd=repo)
         run_git("commit", "-q", "-m", "add ruff config to pyproject", cwd=repo)
@@ -93,7 +92,8 @@ class TestRefusals:
 
     def test_existing_aufsicht_workflow_refuses_no_merge(self, tmp_path):
         repo = make_repo(
-            tmp_path / "wf", with_quality=False,
+            tmp_path / "wf",
+            with_quality=False,
             extra_files={".github/workflows/aufsicht.yml": "name: existing\n"},
         )
         proc = run_cli("init", "--write", cwd=repo)
@@ -117,9 +117,13 @@ class TestWritePhase:
         assert branch_of(repo).startswith("aufsicht/init")
         assert branch_of(repo) != "main"
         for rel in (
-            ".quality/config.toml", ".quality/ruff.toml", ".quality/pytest.ini",
-            ".quality/toolchain.lock", "pyrightconfig.json",
-            ".quality/semgrep/test-disabling.yaml", "AGENTS.md",
+            ".quality/config.toml",
+            ".quality/ruff.toml",
+            ".quality/pytest.ini",
+            ".quality/toolchain.lock",
+            "pyrightconfig.json",
+            ".quality/semgrep/test-disabling.yaml",
+            "AGENTS.md",
         ):
             assert (repo / rel).is_file(), f"missing {rel}"
         assert status_clean(repo)  # everything committed
@@ -131,8 +135,7 @@ class TestWritePhase:
         run_git("checkout", "-q", "-b", "tmp", cwd=repo)
         import subprocess
 
-        subprocess.run(["uv", "lock", "-q"], cwd=str(repo), check=True,
-                       capture_output=True)
+        subprocess.run(["uv", "lock", "-q"], cwd=str(repo), check=True, capture_output=True)
         run_git("add", "-A", cwd=repo)
         run_git("commit", "-q", "-m", "add lockfile", cwd=repo)
         run_git("checkout", "-q", "main", cwd=repo)
@@ -156,7 +159,8 @@ class TestWritePhase:
     def test_existing_agents_md_appended_not_rewritten(self, tmp_path):
         existing = "# Project conventions\n\nWe use src layout.\n"
         repo = make_repo(
-            tmp_path / "agents", with_quality=False,
+            tmp_path / "agents",
+            with_quality=False,
             extra_files={"AGENTS.md": existing},
         )
         assert run_cli("init", "--write", cwd=repo).returncode in (0, 2)
@@ -168,9 +172,7 @@ class TestWritePhase:
         # --force replaces only between the delimiters.
         section_start = content.index("<!-- aufsicht:begin")
         between = content[section_start:]
-        mutated = content[:section_start] + between.replace(
-            "quality-fast", "quality-fast (edited)"
-        )
+        mutated = content[:section_start] + between.replace("quality-fast", "quality-fast (edited)")
         (repo / "AGENTS.md").write_text(mutated, encoding="utf-8")
         run_git("add", "-A", cwd=repo)
         run_git("commit", "-q", "-m", "edit section", cwd=repo)
@@ -182,7 +184,8 @@ class TestWritePhase:
 
     def test_root_ruff_config_absorbed(self, tmp_path):
         repo = make_repo(
-            tmp_path / "absorb", with_quality=False,
+            tmp_path / "absorb",
+            with_quality=False,
             extra_files={"ruff.toml": 'line-length = 120\n\n[lint]\nselect = ["E", "F"]\n'},
         )
         assert run_cli("init", "--write", cwd=repo).returncode in (0, 2)
@@ -196,6 +199,23 @@ class TestWritePhase:
         wf = (repo / ".github" / "workflows" / "aufsicht.yml").read_text(encoding="utf-8")
         assert "fetch-depth: 0" in wf
         assert "aufsicht==" in wf
+
+    def test_ci_workflow_installs_uv_with_the_runner(self, tmp_path):
+        # Issue #18: quality-full needs uv on PATH (v5.1 §4.4 — the
+        # pip-audit gate exits 3 without it), so the emitted workflow
+        # must install it in the runner-install step itself. Without
+        # that, the pipeline init generates is red on every clean
+        # consumer project from the first run.
+        from aufsicht import __version__
+
+        repo = make_repo(tmp_path / "ci-uv", with_quality=False)
+        assert run_cli("init", "--write", cwd=repo).returncode in (0, 2)
+        wf = (repo / ".github" / "workflows" / "aufsicht.yml").read_text(encoding="utf-8")
+        assert f"pip install aufsicht=={__version__} uv" in wf, (
+            "the emitted workflow must install uv in the same step as the "
+            "pinned runner (issue #18): without uv on PATH, quality-full's "
+            "pip-audit gate exits 3 and the generated pipeline is always red"
+        )
 
 
 class TestVerifyPhase:
