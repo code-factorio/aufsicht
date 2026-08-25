@@ -3,6 +3,7 @@
   "strict": [],
   "exclude": [
     ".quality",
-    ".venv"
+    ".venv",
+    ".claude"
   ]
 }
