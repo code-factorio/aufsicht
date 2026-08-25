@@ -184,3 +184,41 @@ class TestWarmEnvVerification:
 
         tc._build_env_in_place(restored, entry_points, pins, build)
         assert built == [restored]
+
+
+class TestStaleLockTakeover:
+    def test_stale_lock_is_reacquired_and_built(self, tmp_path, monkeypatch):
+        # A lock left behind by a dead builder must not cost a full
+        # wait_timeout of polling: the waiter hands the stale lock back
+        # and the caller re-acquires and builds (observed live: a
+        # killed process left proj-*.lock behind and the next build of
+        # that env polled for an hour before failing).
+        import os
+        import time
+
+        monkeypatch.setattr(tc, "_ENV_BUILD_POLL_SECONDS", 0.01)
+        env = tmp_path / "envs" / "analyzer-stale"
+        env.parent.mkdir(parents=True)
+        lock = env.with_name(env.name + ".lock")
+        lock.write_text("999999", encoding="utf-8")  # no such process
+        os.utime(lock, (0, 0))  # far past any staleness threshold
+
+        built = []
+
+        def build(target: Path) -> None:
+            built.append(target)
+            write_layout(target, {"ruff": "0.16.3"})
+
+        started = time.monotonic()
+        result = tc._build_env_in_place(
+            env,
+            ["ruff"],
+            {"ruff": "0.16.3"},
+            build,
+            lock_stale_seconds=0.05,
+            wait_timeout=30.0,
+        )
+        assert result == env
+        assert built == [env]
+        assert time.monotonic() - started < 10  # no wait_timeout burn
+        assert not lock.exists()
