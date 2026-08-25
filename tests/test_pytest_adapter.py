@@ -58,6 +58,20 @@ BROKEN_TEST = (
     "    assert add(1, 2) == 3\n"
 )
 
+ASYNC_TEST = """\
+import asyncio
+
+import pytest
+
+from scratch.app import add
+
+
+@pytest.mark.asyncio
+async def test_add_async():
+    value = await asyncio.sleep(0, result=add(2, 3))
+    assert value == 5
+"""
+
 
 def run_quality(mode: str, repo: Path) -> tuple[int, dict]:
     proc = run_cli(mode, cwd=repo)
@@ -535,3 +549,86 @@ class TestProjectEnvPins:
         )
         assert proc.returncode == 0, proc.stderr
         assert proc.stdout.strip() == pin
+
+
+class TestAsyncioPin:
+    """The optional [tools] pytest-asyncio pin → project env content.
+
+    Issue #20: the project env installs [project.dependencies] plus the
+    pinned runner, never [dependency-groups] (PEP 735), so a plugin a
+    project keeps in its dev group is absent from the gate env and every
+    async test fails as a pytest/failure finding. The pin is the opt-in
+    and lands INERT — this repository's own lock does not carry it, so a
+    consumer's guardrail PR is what switches it on (the pytest-xdist
+    pattern above).
+    """
+
+    # Latest stable against the pinned pytest 9.1.1 — pytest-asyncio
+    # 1.4.0 requires pytest>=8.4,<10. Hard-coded, not resolved at test
+    # time: the lock text below is the line a consumer's PR would write.
+    ASYNCIO_PIN = "1.4.0"
+
+    def _repo_with_pin(self, path: Path) -> Path:
+        """A scratch repo whose lock carries the pin inside [tools]."""
+        repo = make_repo(path)
+        lockfile = repo / ".quality" / "toolchain.lock"
+        # Appended after the last [tools] entry (pyscn), so the line
+        # stays inside the table.
+        pin = f'pytest-asyncio = "{self.ASYNCIO_PIN}"\n'
+        lockfile.write_text(lockfile.read_text(encoding="utf-8") + pin, encoding="utf-8")
+        return repo
+
+    def test_absent_pin_is_todays_pins_exactly(self, tmp_path):
+        # Neither the repository lock nor the scratch lock pins
+        # pytest-asyncio: without the pin the env is exactly today's.
+        repo = make_repo(tmp_path / "nopin")
+        lock = load_toolchain(repo)
+        assert project_env_pins(lock) == (
+            f"pytest=={lock.pin('pytest')}",
+            f"pytest-cov=={lock.pin('pytest-cov')}",
+            f"pytest-xdist=={lock.pin('pytest-xdist')}",
+        )
+
+    def test_present_pin_appends_asyncio_last(self, tmp_path):
+        repo = self._repo_with_pin(tmp_path / "pin")
+        lock = load_toolchain(repo)
+        assert project_env_pins(lock) == (
+            f"pytest=={lock.pin('pytest')}",
+            f"pytest-cov=={lock.pin('pytest-cov')}",
+            f"pytest-xdist=={lock.pin('pytest-xdist')}",
+            f"pytest-asyncio=={self.ASYNCIO_PIN}",
+        )
+
+    def test_pinned_asyncio_lands_in_the_built_project_env(self, tmp_path):
+        # Beyond the pin list: a real build must complete and contain
+        # the plugin. pytest-asyncio ships no console script, so this
+        # also proves the env-completeness check does not demand
+        # bin/pytest-asyncio (plugin-only tools are exempt).
+        repo = self._repo_with_pin(tmp_path / "built")
+        env = project_env(repo, load_toolchain(repo))
+        proc = subprocess.run(
+            [
+                _python(env),
+                "-c",
+                "from importlib.metadata import version; print(version('pytest-asyncio'))",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == self.ASYNCIO_PIN
+
+    def test_async_suite_passes_in_the_gate_env(self, tmp_path):
+        # The issue's scenario, driven through the adapter's own
+        # invocation: the plugin comes ONLY from the pin — the scratch
+        # pyproject declares no dependency on it — and the async test
+        # passes instead of failing with "async def functions are not
+        # natively supported".
+        repo = self._repo_with_pin(tmp_path / "async")
+        commit(repo, {"tests/test_async.py": ASYNC_TEST}, "async test", branch="feature")
+        proc, _seconds, _coverage = run_suite(_stub_context(repo))
+        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        # The adapter's parse contract: no FAILED/ERROR summary line,
+        # i.e. no pytest/failure finding for the async test.
+        assert parse_summary(proc.stdout) == [], proc.stdout
+        assert "not natively supported" not in proc.stdout

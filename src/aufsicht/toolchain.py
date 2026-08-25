@@ -404,7 +404,7 @@ def _build_env_in_place(
 # imported, not executed): they cannot be verified via bin/<name>, so
 # they are excluded from the entry-point completeness check — their
 # dist-info version is still verified like every other pin.
-PLUGIN_ONLY_TOOLS = frozenset({"pytest-cov", "pytest-xdist"})
+PLUGIN_ONLY_TOOLS = frozenset({"pytest-cov", "pytest-xdist", "pytest-asyncio"})
 
 
 def _pin_versions(pins: list[str]) -> dict[str, str]:
@@ -490,10 +490,15 @@ def project_env_key(repo: Path) -> tuple[str, str]:
 def project_env_pins(lock: Toolchain) -> tuple[str, ...]:
     """The pins installed into every project env: the test runner and
     its coverage plugin (v5.1 §19: pytest with branch coverage in the
-    gate), plus the optional parallel-runner plugin when the lock pins
-    it (CI-speed plan M3: a guardrail PR adds the pin to switch the
-    gate suite to xdist; no pin means today's env, exactly). Order is
-    part of the install command, not the identity."""
+    gate), plus the optional plugins when the lock pins them — xdist
+    for a parallel gate suite (CI-speed plan M3), pytest-asyncio for a
+    project whose async tests need a dev-group plugin (issue #20: uv
+    installs [project.dependencies] only, never [dependency-groups],
+    so without the pin every async test fails as a pytest/failure
+    finding while the suite is green in the developer env). A plugin
+    stays a dev-group concern of the guarded project, never a runtime
+    dependency; no pin means today's env, exactly. Order is part of
+    the install command, not the identity."""
     pins: list[str] = []
     if lock.pin("pytest"):
         pins.append(f"pytest=={lock.pin('pytest')}")
@@ -503,6 +508,8 @@ def project_env_pins(lock: Toolchain) -> tuple[str, ...]:
         pins.append(f"pytest-cov=={lock.pin('pytest-cov')}")
     if lock.pin("pytest-xdist"):
         pins.append(f"pytest-xdist=={lock.pin('pytest-xdist')}")
+    if lock.pin("pytest-asyncio"):
+        pins.append(f"pytest-asyncio=={lock.pin('pytest-asyncio')}")
     return tuple(pins)
 
 
