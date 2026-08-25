@@ -5,18 +5,27 @@ restored from a CI cache with the marker intact but wrong tool versions
 installed would silently run the ratchet on diagnostics from the wrong
 analyzer versions. A failed verification is a rebuild — never a pass,
 never a silent skip.
+
+The project_env tests cover issue #19: uv is required to BUILD a
+project dependency environment (a pins-only env would make the pytest
+gate report the broken environment as test findings), while a
+cached-complete env verifies without a build and so needs no uv; and
+the pins-only retry after a failed `-r pyproject.toml` install must
+drop the requirement file, not rerun the identical command.
 """
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import aufsicht.toolchain as tc
-from tests.fixtures.scratch import SCRATCH_TOOLCHAIN
+from tests.fixtures.scratch import SCRATCH_PYPROJECT, SCRATCH_TOOLCHAIN
 
 
 def write_layout(env: Path, versions: dict[str, str], entry_points=("ruff",)) -> None:
@@ -222,3 +231,95 @@ class TestStaleLockTakeover:
         assert built == [env]
         assert time.monotonic() - started < 10  # no wait_timeout burn
         assert not lock.exists()
+
+
+def proj_repo(root: Path, pyproject: str = SCRATCH_PYPROJECT) -> tuple[Path, tc.Toolchain]:
+    """A minimal repo for project_env: the scratch pins plus whatever
+    *pyproject* the test needs (the default declares an installable,
+    empty-dependency [project] table)."""
+    repo = root / "repo"
+    (repo / ".quality").mkdir(parents=True)
+    (repo / ".quality" / "toolchain.lock").write_text(SCRATCH_TOOLCHAIN, encoding="utf-8")
+    (repo / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    return repo, tc.load_toolchain(repo)
+
+
+def proj_env_path(cache: Path, repo: Path, lock: tc.Toolchain) -> Path:
+    """The exact env directory project_env resolves *repo* to — the
+    cache-key derivation mirrored for tests that pre-materialize it."""
+    pins = tc.project_env_pins(lock)
+    files_key, _lockfile = tc.project_env_key(repo)
+    pin_key = hashlib.sha256("\n".join(pins).encode()).hexdigest()[:12]
+    return cache / "projenvs" / f"proj-{files_key}-{pin_key}"
+
+
+class TestProjectEnvRequiresUv:
+    def test_cold_cache_without_uv_is_a_tooling_error(self, tmp_path, monkeypatch):
+        # Issue #19: without uv there is no pins-only env — the pytest
+        # gate would report the missing project dependencies as test
+        # findings, i.e. a broken environment as defective project code.
+        # A defective environment is a tooling error (exit 3).
+        monkeypatch.setattr(tc, "_have_uv", lambda: False)
+        repo, lock = proj_repo(tmp_path)
+        with pytest.raises(tc.ToolingError, match="uv is required") as excinfo:
+            tc.project_env(repo, lock, tmp_path / "cache")
+        assert "Install uv" in (excinfo.value.remedy or "")
+
+    def test_warm_cache_without_uv_is_exempt(self, tmp_path, monkeypatch):
+        # The requirement lives inside build(), so a cached-complete env
+        # verifies and returns without ever building: a warm cache works
+        # without uv, and only a build that is needed but impossible
+        # fails. The placement is the point of this test.
+        monkeypatch.setattr(tc, "_have_uv", lambda: False)
+        repo, lock = proj_repo(tmp_path)
+        cache = tmp_path / "cache"
+        pins = tc.project_env_pins(lock)
+        env = proj_env_path(cache, repo, lock)
+        write_layout(env, dict(tc._pin_versions(list(pins))), entry_points=tc._entry_points(pins))
+        (env / ".aufsicht-ok").write_text("built-by-aufsicht\n", encoding="utf-8")
+        assert tc.project_env(repo, lock, cache) == env
+
+
+class TestProjectEnvPinsOnlyRetry:
+    def test_pyproject_without_project_table_still_builds(self, tmp_path):
+        # The real fallback path (issue #19), not mocked: a pyproject
+        # with no [project] table fails `uv pip install -r
+        # pyproject.toml` with a metadata error. The retry must drop the
+        # requirement file and run on the pins — the gate still gets its
+        # runner, never a half-resolved environment.
+        repo, lock = proj_repo(tmp_path, pyproject='[tool.demo]\nkey = "value"\n')
+        env = tc.project_env(repo, lock, tmp_path / "cache")
+        assert (tc._bin_dir(env) / "pytest").exists()
+
+    def test_retry_command_drops_the_pyproject_requirement(self, tmp_path, monkeypatch):
+        # Command shape of the same path (the slice bug): the old
+        # `install[:-len(pins)]` cut only the pins and reran the
+        # identical `-r pyproject.toml` command. The retry must equal
+        # base + pins, with neither "-r" nor "pyproject.toml" in it.
+        repo, lock = proj_repo(tmp_path)
+        cache = tmp_path / "cache"
+        pins = tc.project_env_pins(lock)
+        env = proj_env_path(cache, repo, lock)
+        commands: list[list[str]] = []
+
+        def fake_subprocess_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+            commands.append(list(cmd))
+            return SimpleNamespace(returncode=1, stdout="", stderr="simulated -r failure")
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> None:
+            commands.append(list(cmd))
+            if cmd[1] == "pip":  # the pins-only retry: materialize the env
+                write_layout(
+                    env, dict(tc._pin_versions(list(pins))), entry_points=tc._entry_points(pins)
+                )
+
+        monkeypatch.setattr(tc.subprocess, "run", fake_subprocess_run)
+        monkeypatch.setattr(tc, "_run", fake_run)
+        assert tc.project_env(repo, lock, cache) == env
+
+        base = ["uv", "pip", "install", "--quiet", "--python", str(tc._bin_dir(env) / "python")]
+        assert commands[1] == [*base, "-r", "pyproject.toml", *list(pins)]
+        retry = commands[2]
+        assert "-r" not in retry
+        assert "pyproject.toml" not in retry
+        assert retry == [*base, *list(pins)]

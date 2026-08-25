@@ -141,6 +141,21 @@ def _have_uv() -> bool:
     return shutil.which("uv") is not None
 
 
+def _require_uv() -> None:
+    """uv is the supported resolver for project dependency environments
+    (issue #19); there is no pins-only fallback — an env without the
+    project's dependencies would make the pytest gate report the broken
+    environment as test findings. A broken environment surfaces as a
+    tooling error (exit 3), never as defective project code."""
+    if not _have_uv():
+        raise ToolingError(
+            "uv is required to build the project dependency environment "
+            "for the pytest gate, but it is not on PATH",
+            remedy="Install uv (https://docs.astral.sh/uv/) and re-run; "
+            "the gate will not run a suite against a half-resolved environment.",
+        )
+
+
 def _run(cmd: list[str], *, timeout: int = 900) -> None:
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
@@ -500,6 +515,12 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
     commit and is made importable via the pytest config's pythonpath
     instead. The cache key includes the env's own pins so a pin bump
     rebuilds rather than reusing an env that lacks the new plugin.
+
+    Building the env requires uv (issue #19): without it the project
+    dependencies cannot be resolved, and the fallback that installed
+    only the pins made the pytest gate report the broken environment as
+    test findings. A cached-complete env is exempt — it verifies without
+    a build, so a warm cache works even without uv.
     """
     cache = cache or cache_dir()
     files_key, _lockfile = project_env_key(repo)
@@ -509,42 +530,36 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
     entry_points = _entry_points(pins)
 
     def build(env: Path) -> None:
-        if _have_uv():
-            _run(["uv", "venv", "--quiet", str(env)])
-            install = [
-                "uv",
-                "pip",
-                "install",
-                "--quiet",
-                "--python",
-                str(_bin_dir(env) / "python"),
-                "-r",
-                "pyproject.toml",
-                *pins,
-            ]
-            proc = subprocess.run(
-                install, cwd=str(repo), capture_output=True, text=True, timeout=900
-            )
-            if proc.returncode != 0:
-                # A project may have no dependencies at all; fall back to
-                # the pins only rather than failing the whole gate.
-                _run(install[: -len(pins)] + list(pins))
-        else:
-            base = shutil.which("python3") or shutil.which("python")
-            if base is None:
-                raise ToolingError("neither uv nor python3 is available to build environments")
-            _run([base, "-m", "venv", str(env)])
-            _run(
-                [
-                    str(_bin_dir(env) / "python"),
-                    "-m",
-                    "pip",
-                    "install",
-                    "--quiet",
-                    "--disable-pip-version-check",
-                    *pins,
-                ]
-            )
+        # Required here, not in project_env: _build_env_in_place
+        # short-circuits on a complete cached env, so a warm cache works
+        # without uv — only a build that is actually needed but
+        # impossible fails (issue #19).
+        _require_uv()
+        _run(["uv", "venv", "--quiet", str(env)])
+        base = [
+            "uv",
+            "pip",
+            "install",
+            "--quiet",
+            "--python",
+            str(_bin_dir(env) / "python"),
+        ]
+        proc = subprocess.run(
+            [*base, "-r", "pyproject.toml", *pins],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        if proc.returncode != 0:
+            # A pyproject may declare nothing installable (no [project]
+            # table), which fails the -r install with a metadata error.
+            # The gate still runs — on the pins only, never on a
+            # half-resolved environment. The retry drops "-r
+            # pyproject.toml" explicitly (issue #19: the old slice kept
+            # it and reran the identical failing command); it needs no
+            # cwd because bare pins are not repo-relative.
+            _run([*base, *pins])
 
     return _build_env_in_place(
         root / f"proj-{files_key}-{pin_key}", entry_points, _pin_versions(list(pins)), build
