@@ -104,9 +104,13 @@ class TestUpgrade:
 
         # Simulate an older installed runner version.
         lock = repo / ".quality" / "toolchain.lock"
+        import re
+
         lock.write_text(
-            lock.read_text(encoding="utf-8").replace(
-                'runner_version = "0.2.0"', 'runner_version = "0.0.9"'
+            re.sub(
+                r'runner_version = "[^"]+"',
+                'runner_version = "0.0.9"',
+                lock.read_text(encoding="utf-8"),
             ),
             encoding="utf-8",
         )

@@ -12,6 +12,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -461,28 +462,54 @@ class TestRunnerArgsPassthrough:
 
 
 class TestProjectEnvPins:
-    """The optional [tools] pytest-xdist pin → project env content."""
+    """The optional [tools] pytest-xdist pin → project env content.
+
+    These tests construct both lock variants themselves: the repository
+    lock carries the pin (the gate suite runs under xdist), so the
+    absent-pin case cannot borrow the ambient scratch lock anymore.
+    """
+
+    @staticmethod
+    def _lock_text_without_xdist(repo: Path) -> str:
+        lockfile = repo / ".quality" / "toolchain.lock"
+        return re.sub(
+            r'^pytest-xdist = "[^"]+"\n', "", lockfile.read_text(encoding="utf-8"), flags=re.M
+        )
+
+    @staticmethod
+    def _xdist_pin(repo: Path) -> str:
+        lockfile = repo / ".quality" / "toolchain.lock"
+        match = re.search(
+            r'^pytest-xdist = "([^"]+)"', lockfile.read_text(encoding="utf-8"), flags=re.M
+        )
+        assert match, "the repository lock must pin pytest-xdist for these tests"
+        return match.group(1)
 
     def test_absent_pin_is_todays_pins_exactly(self, tmp_path):
         repo = make_repo(tmp_path / "nopin")
-        assert project_env_pins(load_toolchain(repo)) == (
-            "pytest==9.1.1",
-            "pytest-cov==7.0.0",
+        (repo / ".quality" / "toolchain.lock").write_text(
+            self._lock_text_without_xdist(repo), encoding="utf-8"
+        )
+        lock = load_toolchain(repo)
+        assert project_env_pins(lock) == (
+            f"pytest=={lock.pin('pytest')}",
+            f"pytest-cov=={lock.pin('pytest-cov')}",
         )
 
     def test_present_pin_installs_xdist_alongside(self, tmp_path):
         repo = make_repo(tmp_path / "pin")
-        lockfile = repo / ".quality" / "toolchain.lock"
+        pin = self._xdist_pin(repo)
         # Appended after the last [tools] entry (pyscn), so the line
         # stays inside the table.
-        lockfile.write_text(
-            lockfile.read_text(encoding="utf-8") + 'pytest-xdist = "3.8.0"\n',
+        (repo / ".quality" / "toolchain.lock").write_text(
+            self._lock_text_without_xdist(repo) + f'pytest-xdist = "{pin}"\n',
             encoding="utf-8",
         )
-        assert project_env_pins(load_toolchain(repo)) == (
-            "pytest==9.1.1",
-            "pytest-cov==7.0.0",
-            "pytest-xdist==3.8.0",
+        lock = load_toolchain(repo)
+        assert project_env_pins(lock) == (
+            f"pytest=={lock.pin('pytest')}",
+            f"pytest-cov=={lock.pin('pytest-cov')}",
+            f"pytest-xdist=={pin}",
         )
 
     def test_pinned_xdist_lands_in_the_built_project_env(self, tmp_path):
@@ -491,9 +518,9 @@ class TestProjectEnvPins:
         # proves the env-completeness check does not demand
         # bin/pytest-xdist (plugin-only tools are exempt).
         repo = make_repo(tmp_path / "built")
-        lockfile = repo / ".quality" / "toolchain.lock"
-        lockfile.write_text(
-            lockfile.read_text(encoding="utf-8") + 'pytest-xdist = "3.8.0"\n',
+        pin = self._xdist_pin(repo)
+        (repo / ".quality" / "toolchain.lock").write_text(
+            self._lock_text_without_xdist(repo) + f'pytest-xdist = "{pin}"\n',
             encoding="utf-8",
         )
         env = project_env(repo, load_toolchain(repo))
@@ -507,4 +534,4 @@ class TestProjectEnvPins:
             text=True,
         )
         assert proc.returncode == 0, proc.stderr
-        assert proc.stdout.strip() == "3.8.0"
+        assert proc.stdout.strip() == pin
