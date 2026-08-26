@@ -506,6 +506,27 @@ def project_env_pins(lock: Toolchain) -> tuple[str, ...]:
     return tuple(pins)
 
 
+def _has_installable_project(repo: Path) -> bool:
+    """True when the checkout carries a pyproject.toml with a [project]
+    table — the only shape `uv pip install -r pyproject.toml` resolves.
+    Installability is decided from the file, never from a uv failure: a
+    failure while the project does declare dependencies is a resolution
+    problem that must surface as a tooling error, because a pins-only
+    retry verifies complete (only the pins are checked) while holding
+    none of the project's dependencies (PR #22 review). An unparseable
+    pyproject counts as installable so uv is the one to report it."""
+    import tomllib
+
+    pyproject = repo / "pyproject.toml"
+    if not pyproject.is_file():
+        return False
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, OSError):
+        return True
+    return isinstance(data.get("project"), dict)
+
+
 def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
     """Project dependency environment for the checkout at *repo*.
 
@@ -520,7 +541,12 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
     dependencies cannot be resolved, and the fallback that installed
     only the pins made the pytest gate report the broken environment as
     test findings. A cached-complete env is exempt — it verifies without
-    a build, so a warm cache works even without uv.
+    a build, so a warm cache works even without uv. A pyproject that
+    declares dependencies uv cannot resolve is likewise a tooling error,
+    never a silent pins-only env: only a checkout with nothing
+    installable (no pyproject.toml, or one without a [project] table)
+    builds on the pins alone — decided from the file, never from a uv
+    failure (PR #22 review).
     """
     cache = cache or cache_dir()
     files_key, _lockfile = project_env_key(repo)
@@ -544,21 +570,33 @@ def project_env(repo: Path, lock: Toolchain, cache: Path | None = None) -> Path:
             "--python",
             str(_bin_dir(env) / "python"),
         ]
-        proc = subprocess.run(
-            [*base, "-r", "pyproject.toml", *pins],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
-        if proc.returncode != 0:
-            # A pyproject may declare nothing installable (no [project]
-            # table), which fails the -r install with a metadata error.
-            # The gate still runs — on the pins only, never on a
-            # half-resolved environment. The retry drops "-r
-            # pyproject.toml" explicitly (issue #19: the old slice kept
-            # it and reran the identical failing command); it needs no
-            # cwd because bare pins are not repo-relative.
+        if _has_installable_project(repo):
+            install = [*base, "-r", "pyproject.toml", *pins]
+            proc = subprocess.run(
+                install, cwd=str(repo), capture_output=True, text=True, timeout=900
+            )
+            if proc.returncode != 0:
+                # The project declares dependencies and uv could not
+                # resolve them (private index, constraint conflict,
+                # build failure). Never degrade to the pins here: that
+                # env verifies complete — only the pins are checked —
+                # and the pytest gate would report the missing imports
+                # as test findings (PR #22 review). A broken environment
+                # is a tooling error, exit 3.
+                raise ToolingError(
+                    f"project dependency install failed: {' '.join(install)}\n"
+                    f"{proc.stderr.strip()[:2000] or proc.stdout.strip()[:2000]}",
+                    remedy="Fix the resolution failure (index access, version "
+                    "constraints, build) — the gate will not run a suite "
+                    "against a half-resolved environment.",
+                )
+        else:
+            # Nothing installable: no pyproject.toml, or one without a
+            # [project] table (uv fails such a -r install with a
+            # metadata error). The pins only — decided from the file,
+            # never from a uv failure (issue #19), so the gate still
+            # gets its runner without a retry that could mask a real
+            # resolution problem.
             _run([*base, *pins])
 
     return _build_env_in_place(

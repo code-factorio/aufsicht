@@ -280,23 +280,60 @@ class TestProjectEnvRequiresUv:
         assert tc.project_env(repo, lock, cache) == env
 
 
-class TestProjectEnvPinsOnlyRetry:
-    def test_pyproject_without_project_table_still_builds(self, tmp_path):
-        # The real fallback path (issue #19), not mocked: a pyproject
-        # with no [project] table fails `uv pip install -r
-        # pyproject.toml` with a metadata error. The retry must drop the
-        # requirement file and run on the pins — the gate still gets its
-        # runner, never a half-resolved environment.
+class TestProjectEnvInstallability:
+    def test_pyproject_without_project_table_installs_pins_only(self, tmp_path):
+        # The nothing-installable path (issue #19), real, not mocked: a
+        # pyproject with no [project] table cannot be a -r requirement
+        # source (uv exits with a metadata error). The env installs the
+        # pins directly — decided from the file, never from a uv
+        # failure — and the gate still gets its runner.
         repo, lock = proj_repo(tmp_path, pyproject='[tool.demo]\nkey = "value"\n')
         env = tc.project_env(repo, lock, tmp_path / "cache")
         assert (tc._bin_dir(env) / "pytest").exists()
 
-    def test_retry_command_drops_the_pyproject_requirement(self, tmp_path, monkeypatch):
-        # Command shape of the same path (the slice bug): the old
-        # `install[:-len(pins)]` cut only the pins and reran the
-        # identical `-r pyproject.toml` command. The retry must equal
-        # base + pins, with neither "-r" nor "pyproject.toml" in it.
+    def test_missing_pyproject_installs_pins_only(self, tmp_path):
+        # Same decision when there is no pyproject at all: the -r
+        # install would fail on the missing file; the static check
+        # never attempts it.
         repo, lock = proj_repo(tmp_path)
+        (repo / "pyproject.toml").unlink()
+        env = tc.project_env(repo, lock, tmp_path / "cache")
+        assert (tc._bin_dir(env) / "pytest").exists()
+
+    def test_unresolved_dependencies_are_a_tooling_error(self, tmp_path, monkeypatch):
+        # PR #22 review: a project that declares dependencies uv cannot
+        # resolve (private index, constraint conflict, build failure)
+        # must fail loudly. The previous code retried with the pins
+        # only; that env verifies complete — only the pins are checked —
+        # and the pytest gate would report the missing imports as test
+        # findings, the exact failure mode of issue #19 through a
+        # different door.
+        repo, lock = proj_repo(tmp_path)
+        installs: list[list[str]] = []
+
+        def fake_subprocess_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+            if cmd[:2] == ["uv", "pip"]:
+                installs.append(list(cmd))
+                return SimpleNamespace(
+                    returncode=1, stdout="", stderr="simulated resolution failure"
+                )
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(tc.subprocess, "run", fake_subprocess_run)
+        with pytest.raises(tc.ToolingError, match="project dependency install failed") as excinfo:
+            tc.project_env(repo, lock, tmp_path / "cache")
+        assert "simulated resolution failure" in str(excinfo.value)
+        assert "half-resolved" in (excinfo.value.remedy or "")
+        # Exactly one install attempt: no silent pins-only retry.
+        assert len(installs) == 1
+
+    def test_pins_only_command_carries_no_requirement_file(self, tmp_path, monkeypatch):
+        # Command shape of the nothing-installable path: the single
+        # install equals base + pins, with neither "-r" nor
+        # "pyproject.toml" in it (the old slice bug reran the identical
+        # -r command; the file-based decision leaves no command to get
+        # wrong).
+        repo, lock = proj_repo(tmp_path, pyproject='[tool.demo]\nkey = "value"\n')
         cache = tmp_path / "cache"
         pins = tc.project_env_pins(lock)
         env = proj_env_path(cache, repo, lock)
@@ -304,11 +341,11 @@ class TestProjectEnvPinsOnlyRetry:
 
         def fake_subprocess_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
             commands.append(list(cmd))
-            return SimpleNamespace(returncode=1, stdout="", stderr="simulated -r failure")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         def fake_run(cmd: list[str], **_kwargs: object) -> None:
             commands.append(list(cmd))
-            if cmd[1] == "pip":  # the pins-only retry: materialize the env
+            if cmd[:2] == ["uv", "pip"]:  # the pins-only install: materialize the env
                 write_layout(
                     env, dict(tc._pin_versions(list(pins))), entry_points=tc._entry_points(pins)
                 )
@@ -317,9 +354,17 @@ class TestProjectEnvPinsOnlyRetry:
         monkeypatch.setattr(tc, "_run", fake_run)
         assert tc.project_env(repo, lock, cache) == env
 
+        installs = [c for c in commands if c[:2] == ["uv", "pip"]]
+        assert len(installs) == 1
+        assert "-r" not in installs[0]
+        assert "pyproject.toml" not in installs[0]
         base = ["uv", "pip", "install", "--quiet", "--python", str(tc._bin_dir(env) / "python")]
-        assert commands[1] == [*base, "-r", "pyproject.toml", *list(pins)]
-        retry = commands[2]
-        assert "-r" not in retry
-        assert "pyproject.toml" not in retry
-        assert retry == [*base, *list(pins)]
+        assert installs[0] == [*base, *list(pins)]
+
+    def test_unparseable_pyproject_counts_as_installable(self, tmp_path):
+        # A broken pyproject must surface uv's error, not silently
+        # degrade to pins: only a missing file or one without a
+        # [project] table is nothing-installable.
+        repo, _lock = proj_repo(tmp_path, pyproject="not = [valid toml\n")
+        assert tc._has_installable_project(repo) is True
+        assert tc._has_installable_project(tmp_path / "elsewhere") is False
