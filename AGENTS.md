@@ -64,6 +64,14 @@ Never, under any circumstances:
 If a gate appears wrong, **stop and report it**. Do not work around it. A task
 that requires weakening its own evaluator is a task that needs a human.
 
+### Deployment approval
+
+The publish job runs in the pypi GitHub environment, which has a required-reviewer rule.
+Every green push to main sits in waiting with no started steps until the release is approved
+(Actions → run → review deployments). A run stuck in waiting is an approval gate, not a CI
+failure - do not hunt for a code defect.
+
+
 ### Escape valve
 
 The only sanctioned exception mechanism is `.quality/allowlist.toml`
