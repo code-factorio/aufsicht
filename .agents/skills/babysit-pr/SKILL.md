@@ -1,6 +1,6 @@
 ---
 name: babysit-pr
-description: Drive a pull request towards merge: answer review comments, clear red CI runs, sync with the target branch, polish title and description, and update the linked Rohrpost or GitHub issue.
+description: "Drive a pull request towards merge: answer review comments, clear red CI runs, sync with the target branch, polish title and description, and update the linked Rohrpost or GitHub issue."
 disable-model-invocation: true
 ---
 
@@ -65,12 +65,13 @@ Done when: every open thread carries a reply, or a drafted reply awaiting the us
 
 ## 4. Clear red CI runs
 
-Pull the failed checks for the head commit using `gh pr checks <number>` or `gh run list --branch <branch>`. Read the failed run logs with `gh run view <run-id> --log-failed` before touching anything. Sort each failure:
+Pull the failed checks for the head commit using `gh pr checks <number>` or `gh run list --branch <branch>`. Read the failed run logs with `gh run view <run-id> --log-failed` before touching anything. Search the log (`… --log-failed | rg -i 'fail\|error\|ratchet'`) instead of reading its tail — a failed aufsicht `quality-full` log ends with the JSON report, and the failing gate sits earlier. Sort each failure:
 
 - **Real**: your code or your test broke it. Fix the root cause. Never weaken an assertion, skip a test, or loosen a lint rule to reach green.
 - **Flake**: non-deterministic, unrelated to the diff, passes on rerun. Retry the job with `gh run rerun <run-id> --failed`. State that you did, and state which job.
 - **Infrastructure**: runner, network, credentials, registry. Report it with the log snippet.
 - **Pre-existing**: the base branch is red too. Report it and move on.
+- **Blocked**: the run is in `waiting` with no started steps — a deployment-environment approval gate (see AGENTS.md, Releases), not a failure.
 
 When the repository has local test or lint commands, run it after your changes and before pushing. A local run costs seconds; a CI cycle costs minutes.
 

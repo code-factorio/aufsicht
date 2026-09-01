@@ -24,3 +24,5 @@ coverage-report/
 # computed, never committed).
 .rohrpost/tickets.jsonl
 .rohrpost/.lock
+docs/retros/**.json
+docs/retros/**.md.log
